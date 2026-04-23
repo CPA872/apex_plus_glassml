@@ -3,7 +3,6 @@ from transformers import MixtralConfig
 from apex_plus.ir.transformer import Transformer
 from apex_plus.models.model import ApexModel
 from apex_plus.ir.cells.attention import MQA
-from apex_plus.ir.cells.ffn import MLP
 from apex_plus.ir.cells.ffn import SwiMoE
 from apex_plus.ir.block import Block
 
@@ -70,7 +69,6 @@ class Mixtral(ApexModel):
         mqa = MQA(
             self.num_heads, self.num_kv_heads, self.head_size_mqa, self.hidden_size
         )
-        mlp = MLP(self.hidden_size, self.intermediate_size)
         swimoe = SwiMoE(
             self.num_experts,
             self.hidden_size,
@@ -78,7 +76,7 @@ class Mixtral(ApexModel):
             self.topk,
             self.capacity_factor,
         )
-        decoder_block = Block(cells=[mqa, mlp, swimoe])
+        decoder_block = Block(cells=[mqa, swimoe])
 
         return Transformer.from_blocks(
             vocab_size=self.vocab_size,

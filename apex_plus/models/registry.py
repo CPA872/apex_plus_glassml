@@ -53,14 +53,30 @@ def get_model_ir(
     if arch not in _MODEL_REGISTRY:
         raise ValueError(f"Model architecture {arch} not supported")
 
-    if num_experts is None or num_experts == 1:
+    # Native MoE architectures that read expert config from HF config.json
+    _NATIVE_MOE_ARCHS = {"MixtralForCausalLM"}
+    # Dense architectures that support conversion to MoE via extra args
+    _MOE_CONVERTIBLE_ARCHS = {"OPTForCausalLM": OPTMoE}
+
+    if arch in _NATIVE_MOE_ARCHS:
+        model = _MODEL_REGISTRY[arch].from_hf(
+            config,
+            num_experts=getattr(config, "num_local_experts", 8),
+            topk=getattr(config, "num_experts_per_tok", 2),
+            capacity_factor=capacity_factor,
+        )
+    elif num_experts is not None and num_experts > 1:
+        # Dense model converted to MoE.
+        if arch not in _MOE_CONVERTIBLE_ARCHS:
+            raise ValueError(
+                f"Architecture {arch} does not support dense-to-MoE conversion. "
+                f"Supported: {list(_MOE_CONVERTIBLE_ARCHS.keys())}"
+            )
+        model = _MOE_CONVERTIBLE_ARCHS[arch].from_hf(
+            config, num_experts=num_experts, topk=topk, capacity_factor=capacity_factor
+        )
+    else:
         # Non-MoE models.
         model = _MODEL_REGISTRY[arch].from_hf(config)
-    else:
-        # assert num_experts > 1
-        # MoE models.
-        model = _MODEL_REGISTRY[arch].from_hf(
-            config, num_experts=1, topk=1, capacity_factor=1
-        )
 
     return model.to_ir(), model

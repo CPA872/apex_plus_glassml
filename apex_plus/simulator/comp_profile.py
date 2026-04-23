@@ -7,6 +7,8 @@ from apex_plus.ir.tasks.attention import MHAHead
 from apex_plus.ir.tasks.ffn import MLPFilter, GLUFilter, SwiGLUFilter
 from apex_plus.utils.dtype import DTYPE, dtype_to_str
 
+MAX_NUM_INPUT_TOKENS = 64 * 1024  # Max profiled n dimension for GEMM
+
 GEMM_TMPL = "profile/comp/{gpu}/gemm_{freq}.csv"  # e.g. gemm_1980.csv
 MHA_TMPL = "profile/comp/{gpu}/mha_{freq}.csv"
 BI_MHA_TMPL = "profile/comp/{gpu}/bimha_{freq}.csv"
@@ -135,6 +137,15 @@ def gemm_time(
         m = round_to_power_of_2(m)
         k = round_to_power_of_2(k)
         n = round_to_power_of_2(n)
+
+    # Extrapolate linearly for n beyond profiled range.
+    # For large n, GEMMs are compute-bound and scale linearly.
+    max_profiled_n = MAX_NUM_INPUT_TOKENS
+    if n > max_profiled_n:
+        scale = n / max_profiled_n
+        time, energy = _gemm_time(gpu, frequency, m, k, max_profiled_n, dtype)
+        return time * scale, energy * scale
+
     return _gemm_time(gpu, frequency, m, k, n, dtype)
 
 

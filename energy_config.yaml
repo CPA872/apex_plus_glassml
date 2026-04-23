@@ -1,0 +1,20 @@
+# Communication energy parameters (pJ/bit)
+#
+# Intra-node NVLink (<=8 GPUs/node, short PCB traces):
+#   Wei et al., "NVLink-C2C," ISSCC 2023, Paper 9.3 — 1.3 pJ/bit.
+#   See also: Poulton et al., IEEE JSSC vol. 54, 2019 (1.17 pJ/bit GRS SerDes).
+#
+# Rack-scale NVLink (>8 GPUs/node, NVL72 copper cables through NVSwitch trays):
+#   ~5 pJ/bit — estimated from 112G PAM4 SerDes class, similar to PCIe Gen5
+#   (NVIDIA implies PCIe Gen5 ~6.5 pJ/bit via "5x more efficient" C2C claim).
+#
+# IB full path (~70 pJ/bit):
+#   NIC:    ~30 pJ/bit — derived from NVIDIA CX-7 VPI specs (~12W ASIC @ 400Gbps)
+#   Optics: ~25 pJ/bit — QSFP-DD MSA spec (10-12W @ 400Gbps);
+#           Minkenberg et al., IET Optoelectronics vol. 15, 2021
+#   Switch: ~12 pJ/bit — derived from Quantum-2 QM9790 datasheet (640W / 51.2Tbps);
+#           Chen et al., "Waferscale Network Switches," ISCA 2024
+
+nvlink_intra_node_pj_per_bit: 1.3    # <=8 GPUs/node (DGX-internal)
+nvlink_rack_scale_pj_per_bit: 5.0    # >8 GPUs/node (NVL72 copper cables)
+ib_pj_per_bit: 70.0                  # Full IB path (NIC + optics + switch)

@@ -11,13 +11,45 @@ from apex_plus.execution.plan import ExecutionPlan
 from apex_plus.ir.transformer import Transformer
 from apex_plus.parallel.comm import CommType
 from apex_plus.parallel.schedule import StageSchedule
-from apex_plus.simulator.comm_profile import get_comm_time, get_p2p_comm_time
+from apex_plus.simulator.comm_profile import get_comm_time, get_comm_energy, get_p2p_comm_time, InterconnectConfig
 from apex_plus.simulator.comp_profile import mha_time, mlp_time, glu_time, swiglu_time
 from apex_plus.simulator.trace import Trace, Request
 from apex_plus.utils.dtype import DTYPE
 
 GB = 1024 * 1024 * 1024
 WORKSPACE = 1 * GB  # a constant buffer for each device to run the program
+
+
+def _zipf_skew(num_experts: int, num_devices: int, zipf_s: float) -> float:
+    """Compute max_gpu_load / avg_gpu_load under Zipfian expert popularity.
+
+    Expert i (1-indexed, sorted by popularity) gets probability proportional
+    to 1/i^s.  Experts are assigned to GPUs round-robin by popularity rank,
+    so GPU 0 gets experts {0, G, 2G, ...} (the hottest from each "stripe").
+    The most-loaded GPU's total probability, divided by the average (1/G),
+    gives the skew factor that AllToAll completion time scales by.
+
+    Args:
+        num_experts: total number of routed experts (E)
+        num_devices: number of GPUs in the EP group (G)
+        zipf_s: Zipf exponent. 0 = uniform, ~0.3-0.7 typical with load balancing,
+                1.0 = classic Zipf.
+    Returns:
+        skew factor >= 1.0
+    """
+    if zipf_s <= 0.0 or num_devices <= 1:
+        return 1.0
+    # Unnormalized probabilities for each expert rank (1-indexed)
+    ranks = np.arange(1, num_experts + 1, dtype=np.float64)
+    probs = 1.0 / np.power(ranks, zipf_s)
+    # Round-robin assignment: GPU g gets experts {g, g+G, g+2G, ...}
+    experts_per_gpu = num_experts // num_devices
+    gpu_loads = np.zeros(num_devices)
+    for g in range(num_devices):
+        gpu_loads[g] = probs[g::num_devices].sum()
+    avg_load = probs.sum() / num_devices
+    max_load = gpu_loads.max()
+    return max_load / avg_load
 
 MAX_NUM_INPUT_TOKENS = 64 * 1024  # Max in profile/scripts/gemm.py
 
@@ -49,11 +81,17 @@ class Simulator:
         cluster: Cluster,
         trace: Trace,
         dtype: dict,
+        interconnect: InterconnectConfig = None,
+        moe_skew: float = 1.0,
+        energy_config=None,
     ) -> None:
         self.model = model
         self.cluster = cluster
         self.trace = trace
         self.dtype = dtype
+        self.interconnect = interconnect
+        self.moe_skew = moe_skew  # flat multiplier or 0 to use Zipf
+        self.energy_config = energy_config
         self.gpu = cluster.get_device().device_type
         self.gpu_memory = cluster.get_device_memory_capacity()
         self.peak_flops = cluster.get_device().peak_flops[self.highest_prec()]
@@ -347,7 +385,9 @@ class Simulator:
         )
 
         max_num_tokens = min(
-            int(available_memories[i] // kv_token_sizes[i]) for i in range(num_devices)
+            int(available_memories[i] // kv_token_sizes[i])
+            for i in range(num_devices)
+            if kv_token_sizes[i] > 0
         )
         # Evenly partition the KV cache for each stage.
         max_num_tokens_per_stage = max_num_tokens // num_stages
@@ -609,11 +649,9 @@ class Simulator:
                         break
 
                     num_tokens = sum(input_lens) + input_len
-                    # If the total number of tokens exceeds the maximum, stop.
-                    if (
-                        num_tokens * num_attn_cell_replicas / min_num_replicas
-                        > MAX_NUM_INPUT_TOKENS
-                    ):
+                    # If the per-device tokens exceed profiled GEMM max, stop.
+                    # num_tokens is per-attention-replica = per-device for GEMM n dim.
+                    if num_tokens > MAX_NUM_INPUT_TOKENS:
                         break
                     
                     curr_batch_size = len(running)
@@ -638,7 +676,7 @@ class Simulator:
                     # This can happen when the space for the KV cache is
                     # too small to store even a single sequence.
                     if num_cached_tokens + input_len > max_num_tokens_per_stage:
-                        return None, None, None, None, None, None
+                        return None, None, None, None, None, None, None
                     else:
                         # Or because the requests are coming too slow;
                         # wait until next request comes.
@@ -648,7 +686,7 @@ class Simulator:
                             )
                             internal_clock = requests[req_counter].time_stamp
                         else:
-                            return None, None, None, None, None, None
+                            return None, None, None, None, None, None, None
 
                 else:
                     # All the requests are finished.
@@ -865,7 +903,21 @@ class Simulator:
                     num_elements = num_input_tokens * hidden_size
                     num_input_tokens = max(num_input_tokens // comm.num_devices, 1)
                 elif comm.comm_type == CommType.AllToAll:
-                    num_elements = num_input_tokens * hidden_size
+                    # Non-uniform routing: AllToAll completion time is bounded
+                    # by the most-loaded GPU under skewed expert popularity.
+                    skew = 1.0
+                    if self.moe_skew > 0:
+                        # moe_skew is the Zipf exponent s (0=uniform, ~1=Zipf).
+                        # Find the MoE cell to get num_experts.
+                        for cs in stage_schedule.cell_schedules:
+                            if cs.cell.get_name() in ("MoE", "SwiMoE"):
+                                skew = _zipf_skew(
+                                    cs.cell.num_experts,
+                                    comm.num_devices,
+                                    self.moe_skew,
+                                )
+                                break
+                    num_elements = int(num_input_tokens * hidden_size * skew)
                 else:
                     raise NotImplementedError(
                         f"Unsupported comm type: {comm.comm_type}"
@@ -877,8 +929,18 @@ class Simulator:
                     num_devices_per_node,
                     self.dtype["act"],
                     num_elements,
+                    self.interconnect,
                 )
                 execution_time.append(comm_time)
+                comm_energy = get_comm_energy(
+                    comm.comm_type,
+                    num_nodes,
+                    num_devices_per_node,
+                    self.dtype["act"],
+                    num_elements,
+                    self.energy_config,
+                )
+                execution_energy.append(comm_energy)
 
         # Multiply the block execution time by the number of blocks.
         return [t * stage_schedule.num_blocks for t in execution_time], [
@@ -902,6 +964,7 @@ class Simulator:
                 num_gpus_per_node=1,
                 dtype=self.dtype["act"],
                 num_elements=num_input_tokens * hidden_size,
+                interconnect=self.interconnect,
             )
         else:
             return get_p2p_comm_time(
@@ -910,4 +973,5 @@ class Simulator:
                 num_gpus_per_node=2,
                 dtype=self.dtype["act"],
                 num_elements=num_input_tokens * hidden_size,
+                interconnect=self.interconnect,
             )

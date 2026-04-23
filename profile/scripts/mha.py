@@ -40,18 +40,17 @@ class Profiler:
         self.handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
 
     def _get_gpu_freq_pairs(self):
-        max_pairs = []
-        memory_clocks = pynvml.nvmlDeviceGetSupportedMemoryClocks(self.handle)
         try:
-            for mem_clk in memory_clocks:
-                graphics_clks = pynvml.nvmlDeviceGetSupportedGraphicsClocks(self.handle, mem_clk)
-                if graphics_clks:
-                    max_graphics_clk = max(graphics_clks)
-                    max_pairs.append((mem_clk, max_graphics_clk))
-        except:
-            print(f"Error when getting valid freq pairs")
+            memory_clocks = pynvml.nvmlDeviceGetSupportedMemoryClocks(self.handle)
+            max_mem_clk = max(memory_clocks)
+            graphics_clks = pynvml.nvmlDeviceGetSupportedGraphicsClocks(
+                self.handle, max_mem_clk
+            )
+            max_graph_clk = max(graphics_clks)
+        except pynvml.NVMLError as e:
+            print(f"Error getting supported GPU clocks from NVML: {e}")
             exit(1)
-        return [(2619, 1980), (2619, 810)]
+        return [(max_mem_clk, max_graph_clk)]
  
     def _set_gpu_freq(self, mem_clk, graph_clk):
         try:

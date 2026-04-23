@@ -71,20 +71,17 @@ class GemmProfiler:
         return avg_time * 1000 * 1000, avg_power
 
     def _get_gpu_freq_pairs(self):
-        max_pairs = []
-        memory_clocks = pynvml.nvmlDeviceGetSupportedMemoryClocks(self.handle)
         try:
-            for mem_clk in memory_clocks:
-                graphics_clks = pynvml.nvmlDeviceGetSupportedGraphicsClocks(
-                    self.handle, mem_clk
-                )
-                if graphics_clks:
-                    max_graphics_clk = max(graphics_clks)
-                    max_pairs.append((mem_clk, max_graphics_clk))
-        except:
-            print(f"Error when getting valid freq pairs")
+            memory_clocks = pynvml.nvmlDeviceGetSupportedMemoryClocks(self.handle)
+            max_mem_clk = max(memory_clocks)
+            graphics_clks = pynvml.nvmlDeviceGetSupportedGraphicsClocks(
+                self.handle, max_mem_clk
+            )
+            max_graph_clk = max(graphics_clks)
+        except pynvml.NVMLError as e:
+            print(f"Error getting supported GPU clocks from NVML: {e}")
             exit(1)
-        return [(2619, 1980), (2619, 810), (1593, 810)]
+        return [(max_mem_clk, max_graph_clk)]
 
     def _set_gpu_freq(self, mem_clk, graph_clk):
         try:
@@ -162,7 +159,7 @@ class GemmProfiler:
     ) -> pd.DataFrame:
         data: List[Tuple[str, str, int, int, int, int]] = []
         freq_pairs = self._get_gpu_freq_pairs()
-        for mem_clk, graph_clk in freq_pairs[1:]:
+        for mem_clk, graph_clk in freq_pairs:
             print(f"Changing frequency to {mem_clk},{graph_clk} ")
 
             try:
@@ -238,7 +235,7 @@ def main(gpu: str, num_gpus: int, dtype: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--gpu", type=str, required=True, choices=["V100-PCIE-16GB", "H100-SXM-80GB"]
+        "--gpu", type=str, required=True, choices=["V100-PCIE-16GB", "H100-SXM-80GB", "RTX-PRO6000-BLACKWELL", "B200-NVL72-192GB"]
     )
     parser.add_argument("--num-gpus", type=int, required=True)
     parser.add_argument("--dtype", type=str, default="half", choices=["half", "float"])

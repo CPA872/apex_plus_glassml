@@ -29,6 +29,9 @@ class SearchEngine:
         trace: "Trace",
         arch: str,
         dtype: dict,
+        interconnect=None,
+        moe_skew: float = 1.0,
+        energy_config=None,
     ) -> None:
         self.model = model
         self.cluster = cluster
@@ -36,7 +39,7 @@ class SearchEngine:
         self.dtype = dtype
         self.arch = arch
 
-        self.simulator = Simulator(model, cluster, trace, dtype)
+        self.simulator = Simulator(model, cluster, trace, dtype, interconnect, moe_skew, energy_config)
 
     def generate_schedules(
         self,
@@ -223,27 +226,53 @@ class SearchEngine:
         req_percentiles=[],
         token_percentiles=[],
         model_config=[],
-        ttft_slo = 10, 
-        tpot_slo = 10, 
-        max_batch_size = 0) -> List[ExecutionPlan]:
+        ttft_slo = 10,
+        tpot_slo = 10,
+        max_batch_size = 0,
+        force_ep: int = 0) -> List[ExecutionPlan]:
         """Search for the best execution plan."""
         candidate_plans = self.generate_plans(self.arch, self.cluster)
+        if force_ep > 0:
+            filtered = []
+            for plan in candidate_plans:
+                stage_sched = plan.parallel_schedule.stage_schedule
+                # Find MoE EP degree.
+                moe_ep = None
+                for cs in stage_sched.cell_schedules:
+                    if cs.cell.get_name() in ("MoE", "SwiMoE"):
+                        moe_ep = cs.get_num_devices()
+                        break
+                if moe_ep is None or moe_ep < force_ep:
+                    continue
+                # Enforce training constraint: TP × EP = total devices.
+                # Attention cell-DP must equal MoE EP, giving TP = stage_devices / EP.
+                attn_ok = True
+                for cs in stage_sched.cell_schedules:
+                    if cs.cell.is_attn() and cs.num_replicas != moe_ep:
+                        attn_ok = False
+                        break
+                if attn_ok:
+                    filtered.append(plan)
+            candidate_plans = filtered
         print(f"Generated {len(candidate_plans)} {self.arch} candidate plans.")
 
         outputs: List[Tuple[ExecutionPlan, SimulatorOutput]] = []
         slo_targets = [ttft_slo, tpot_slo]
         for plan in tqdm(candidate_plans):
-            requests, output = self.simulator.simulate(
+            result = self.simulator.simulate(
                 plan,
                 self.arch,
                 frequency,
                 model_config,
                 req_percentiles,
                 token_percentiles,
-                slo_targets, 
+                slo_targets,
                 max_batch_size)
-            if output is None:
+            if result is None:
                 # Invalid plan (e.g., when the model does not fit in memory).
+                continue
+            requests, output = result
+            if output is None:
                 continue
             outputs.append((plan, output))
 
@@ -395,6 +424,17 @@ class SearchEngine:
         print("* Time breakdown:")
         print(table)
         print("Energy Consumption:", f"{output.total_energy / 1000000000:.2f}", "KJ")
+
+
+def get_plan_tag(plan: ExecutionPlan) -> str:
+    """Return a string tag describing the plan's parallelism config."""
+    ps = plan.parallel_schedule
+    ss = ps.stage_schedule
+    parts = [f"dp{ps.num_model_replicas}", f"pp{ps.num_stages}"]
+    for cs in ss.cell_schedules:
+        name = cs.cell.get_name()
+        parts.append(f"{name.lower()}{cs.num_replicas}x{cs.task_mapping.get_num_devices()}")
+    return ".".join(parts)
 
 
 def _get_divisors(n: int) -> List[int]:
