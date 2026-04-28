@@ -11,12 +11,11 @@ import subprocess
 import os
 import signal
 import threading
-import queue
 import time
 
 NUM_WARMUP = 5
 
-H: Number of attention heads up to 128.
+# H: Number of attention heads up to 128.
 H = [1, 2, 4, 8, 16, 24, 32, 40, 48, 52, 64, 96, 128]
 # D: Head dimension.
 D = [64, 80, 96, 128, 112, 256]
@@ -37,7 +36,15 @@ class Profiler:
         self.num_gpus = num_gpus
 
         pynvml.nvmlInit()
-        self.handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
+        # Ray sets CUDA_VISIBLE_DEVICES per actor; NVML indices are physical, so
+        # resolve via the visible device's UUID/index instead of the actor index.
+        cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")[0].strip()
+        if cvd.startswith("GPU-") or cvd.startswith("MIG-"):
+            self.handle = pynvml.nvmlDeviceGetHandleByUUID(cvd.encode())
+        elif cvd:
+            self.handle = pynvml.nvmlDeviceGetHandleByIndex(int(cvd))
+        else:
+            self.handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
 
     def _get_gpu_freq_pairs(self):
         try:
@@ -83,16 +90,14 @@ class Profiler:
 
     def _start_power_logging(self, log_file: str, tag: str, interval_ms: int = 50):
         stop_event = threading.Event()
-        q = queue.Queue()
 
         def logger():
             with open(log_file, "a") as f:
                 while not stop_event.is_set():
-                    result = subprocess.run(
-                        ["nvidia-smi", "--query-gpu=power.draw", "--format=csv,noheader,nounits"],
-                        capture_output=True, text=True
-                    )
-                    power = result.stdout.strip().split("\n")[0]
+                    try:
+                        power = pynvml.nvmlDeviceGetPowerUsage(self.handle) / 1000.0
+                    except pynvml.NVMLError:
+                        power = 0.0
                     timestamp = time.time()
                     f.write(f"{power},{timestamp},{tag}\n")
                     f.flush()
@@ -122,6 +127,8 @@ class Profiler:
     def _profile(self, h: int, d: int, b: int, l: int, dtype: str, attention: str) -> float:
         if dtype == "half":
             dtype = torch.float16
+        elif dtype == "bfloat16":
+            dtype = torch.bfloat16
         elif dtype == "float":
             dtype = torch.float32
         else:
@@ -227,10 +234,10 @@ def main(gpu: str, num_gpus: int, dtype: str, attention: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--gpu", type=str, required=True,
-                        choices=["V100-PCIE-16GB","H100-SXM-80GB"])
+                        choices=["V100-PCIE-16GB", "H100-SXM-80GB", "RTX-PRO6000-BLACKWELL", "B200-SXM-192GB"])
     parser.add_argument("--num-gpus", type=int, required=True)
     parser.add_argument("--dtype", type=str, default="half",
-                        choices=["half", "float"])
+                        choices=["half", "bfloat16", "float"])
     parser.add_argument("--attention", type=str, required=True,
                         choices=["MHA", "BiMHA"])
     args = parser.parse_args()

@@ -6,7 +6,7 @@ import yaml
 from apex_plus.cluster.cluster import Cluster
 from apex_plus.models.registry import get_model_ir
 from apex_plus.search.engine import SearchEngine
-from apex_plus.simulator.comm_profile import EnergyConfig, InterconnectConfig
+from apex_plus.simulator.comm_profile import EnergyConfig, InterconnectConfig, SpectraConfig
 from apex_plus.simulator.trace import Trace
 from apex_plus.utils.dtype import DTYPE, _DTYPE_REGISTRY
 
@@ -79,16 +79,22 @@ def main(args: argparse.Namespace):
         num_rails=args.ib_rails,
     )
 
-    # Load communication energy config
-    energy_config = EnergyConfig()  # defaults
-    energy_path = args.energy_config
-    if energy_path is None and os.path.exists("energy_config.yaml"):
-        energy_path = "energy_config.yaml"
-    if energy_path:
-        with open(energy_path) as f:
-            cfg = yaml.safe_load(f)
+    # Load simulator config (energy + spectra).
+    energy_config = EnergyConfig()
+    spectra_config = SpectraConfig()
+    config_path = args.config
+    if config_path is None and os.path.exists("config.yaml"):
+        config_path = "config.yaml"
+    if config_path:
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f) or {}
+        energy_cfg = cfg.get("energy", {})
         energy_config = EnergyConfig(**{
-            k: v for k, v in cfg.items() if k in EnergyConfig.__dataclass_fields__
+            k: v for k, v in energy_cfg.items() if k in EnergyConfig.__dataclass_fields__
+        })
+        spectra_cfg = cfg.get("spectra", {})
+        spectra_config = SpectraConfig(**{
+            k: v for k, v in spectra_cfg.items() if k in SpectraConfig.__dataclass_fields__
         })
 
     if model.num_encoder_blocks == 0 and model.num_decoder_blocks == 0:
@@ -350,12 +356,12 @@ if __name__ == "__main__":
         default=None,
         help="Representative token count for demand matrix (default: prompt_len).",
     )
-    # Energy config
+    # Simulator config (energy + spectra)
     parser.add_argument(
-        "--energy-config",
+        "--config",
         type=str,
         default=None,
-        help="Path to YAML energy config file. Default: energy_config.yaml if present.",
+        help="Path to YAML simulator config file. Default: config.yaml if present.",
     )
     args = parser.parse_args()
 

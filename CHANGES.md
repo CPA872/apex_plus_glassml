@@ -184,16 +184,17 @@ Extracts R×R byte-traffic matrices from execution plans, where R = total GPU ra
 
 **EP with Zipf skew produces asymmetric matrices:** All source ranks send the same total distribution, but destination ranks receive proportional to their expert popularity. GPU 0 (hottest experts via round-robin assignment) receives up to 31× more than the coldest GPU at Zipf(1.0) with 256 experts across 64 GPUs.
 
-### 6. Communication energy modeling — `comm_profile.py`, `simulator.py`, `energy_config.yaml` (~50 lines added)
+### 6. Communication energy modeling — `comm_profile.py`, `simulator.py`, `config.yaml` (~50 lines added)
 
 **Problem:** APEX+ modeled compute energy from profiled CSVs (GEMM, MHA, MLP energy at specific GPU frequencies in μJ) but had **zero communication energy**. In `get_stage_execution_time()`, resharding comms appended time to `execution_time` but nothing to `execution_energy`. All reported energy was purely from GPU compute, understating total system energy for communication-heavy workloads like MoE AllToAll.
 
-#### New: `energy_config.yaml` (top-level config file)
+#### New: `config.yaml` (top-level config file, `energy:` section)
 
 ```yaml
-nvlink_intra_node_pj_per_bit: 1.3    # <=8 GPUs/node (DGX-internal)
-nvlink_rack_scale_pj_per_bit: 5.0    # >8 GPUs/node (NVL72 copper cables)
-ib_pj_per_bit: 70.0                  # Full IB path (NIC + optics + switch)
+energy:
+  nvlink_intra_node_pj_per_bit: 1.3    # <=8 GPUs/node (DGX-internal)
+  nvlink_rack_scale_pj_per_bit: 5.0    # >8 GPUs/node (NVL72 copper cables)
+  ib_pj_per_bit: 70.0                  # Full IB path (NIC + optics + switch)
 ```
 
 Three distinct energy rates handle the physical differences between interconnect paths:
@@ -217,7 +218,7 @@ class EnergyConfig:
     rack_scale_threshold: int = 8       # GPUs/node boundary
 ```
 
-Auto-loaded from `energy_config.yaml` if present in the working directory, or from `--energy-config <path>`.
+Auto-loaded from `config.yaml` (under `energy:` section) if present in the working directory, or from `--config <path>`.
 
 #### New: `get_comm_energy()` function (`comm_profile.py`)
 
@@ -268,7 +269,7 @@ Communication energy is a small fraction of total energy (compute dominates), bu
   --force-ep <int>              # Force minimum EP degree with training constraint (TP × EP = total)
   --demand-matrix <dir>         # Output directory for R×R byte-traffic matrices
   --dm-num-tokens <int>         # Representative token count (default: prompt_len)
-  --energy-config <path>        # Path to YAML energy config (default: energy_config.yaml if present)
+  --config <path>               # Path to YAML simulator config (default: config.yaml if present)
   ```
 - Constructs `InterconnectConfig` and passes through both encoder and decoder `SearchEngine` instantiations
 - After search, if `--demand-matrix` is set, calls `extract_demand_matrices` on the best plan and writes output files
@@ -451,7 +452,7 @@ python main.py --model deepseek-v3 --num-nodes 1 --num-gpus-per-node 64 \
 # Custom energy config
 python main.py --model deepseek-v3 --num-nodes 1 --num-gpus-per-node 64 \
   --gpu H100-SXM-80GB --prompt-len 8192 --output-len 1 --num-requests 4096 \
-  --force-ep 64 --frequency 1980 --energy-config energy_config.yaml
+  --force-ep 64 --frequency 1980 --config config.yaml
 
 # Comm-only energy (--frequency 0 disables compute energy)
 python main.py --model deepseek-v3 --num-nodes 1 --num-gpus-per-node 64 \

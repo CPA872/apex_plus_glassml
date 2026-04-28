@@ -11,7 +11,6 @@ import subprocess
 import os
 import signal
 import threading
-import queue
 
 
 NUM_WARMUP = 5
@@ -33,11 +32,21 @@ class GemmProfiler:
         self.num_gpus = num_gpus
 
         pynvml.nvmlInit()
-        self.handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
+        # Ray sets CUDA_VISIBLE_DEVICES per actor; NVML indices are physical, so
+        # resolve via the visible device's UUID/index instead of the actor index.
+        cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")[0].strip()
+        if cvd.startswith("GPU-") or cvd.startswith("MIG-"):
+            self.handle = pynvml.nvmlDeviceGetHandleByUUID(cvd.encode())
+        elif cvd:
+            self.handle = pynvml.nvmlDeviceGetHandleByIndex(int(cvd))
+        else:
+            self.handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
 
     def _profile(self, m: int, k: int, n: int, dtype: str) -> Tuple[float, float]:
         if dtype == "half":
             dtype = torch.float16
+        elif dtype == "bfloat16":
+            dtype = torch.bfloat16
         elif dtype == "float":
             dtype = torch.float32
         else:
@@ -111,21 +120,14 @@ class GemmProfiler:
 
     def _start_power_logging(self, log_file: str, tag: str, interval_ms: int = 50):
         stop_event = threading.Event()
-        q = queue.Queue()
 
         def logger():
             with open(log_file, "a") as f:
                 while not stop_event.is_set():
-                    result = subprocess.run(
-                        [
-                            "nvidia-smi",
-                            "--query-gpu=power.draw",
-                            "--format=csv,noheader,nounits",
-                        ],
-                        capture_output=True,
-                        text=True,
-                    )
-                    power = result.stdout.strip().split("\n")[0]
+                    try:
+                        power = pynvml.nvmlDeviceGetPowerUsage(self.handle) / 1000.0
+                    except pynvml.NVMLError:
+                        power = 0.0
                     timestamp = time.time()
                     f.write(f"{power},{timestamp},{tag}\n")
                     f.flush()
@@ -170,7 +172,6 @@ class GemmProfiler:
                             i = mi * len(K) * len(N) + ki * len(N) + ni
                             if i % self.num_gpus != self.idx:
                                 continue
-                            t = self._profile(m, k, n, dtype)
                             t, avg_power = self._profile(m, k, n, dtype)
                             avg_energy = int(t) * avg_power
                             data.append(
@@ -235,10 +236,10 @@ def main(gpu: str, num_gpus: int, dtype: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--gpu", type=str, required=True, choices=["V100-PCIE-16GB", "H100-SXM-80GB", "RTX-PRO6000-BLACKWELL", "B200-NVL72-192GB"]
+        "--gpu", type=str, required=True, choices=["V100-PCIE-16GB", "H100-SXM-80GB", "RTX-PRO6000-BLACKWELL", "B200-SXM-192GB"]
     )
     parser.add_argument("--num-gpus", type=int, required=True)
-    parser.add_argument("--dtype", type=str, default="half", choices=["half", "float"])
+    parser.add_argument("--dtype", type=str, default="half", choices=["half", "bfloat16", "float"])
     args = parser.parse_args()
 
     print(args)

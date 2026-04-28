@@ -30,6 +30,12 @@ class EnergyConfig:
     ib_pj_per_bit: float = 70.0                  # Full IB path (NIC + optics + switch)
     rack_scale_threshold: int = 8                 # GPUs/node boundary
 
+
+@dataclass(frozen=True)
+class SpectraConfig:
+    num_planes: int = 4          # s — number of parallel OCS planes
+    reconfig_delay: float = 0.01 # delta — per-perm reconfig cost (units = demand-matrix entry units)
+
 _COMM_TYPE_TO_OP_KIND = {
     CommType.AllGather: "allgather",
     CommType.AllReduce: "allreduce",

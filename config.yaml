@@ -1,0 +1,26 @@
+# APEX+ simulator configuration.
+# Loaded automatically from config.yaml in the working dir, or via --config <path>.
+
+# Communication energy parameters (pJ/bit).
+#
+# Intra-node NVLink (<=8 GPUs/node, short PCB traces):
+#   Wei et al., "NVLink-C2C," ISSCC 2023, Paper 9.3 — 1.3 pJ/bit.
+#   Poulton et al., IEEE JSSC vol. 54, 2019 (1.17 pJ/bit GRS SerDes).
+# Rack-scale NVLink (>8 GPUs/node, NVL72 copper cables through NVSwitch trays):
+#   ~5 pJ/bit — estimated from 112G PAM4 SerDes class, similar to PCIe Gen5
+#   (NVIDIA implies PCIe Gen5 ~6.5 pJ/bit via "5x more efficient" C2C claim).
+# IB full path (~70 pJ/bit):
+#   NIC ~30 pJ/bit (NVIDIA CX-7 VPI: ~12W @ 400Gbps);
+#   Optics ~25 pJ/bit (QSFP-DD MSA, 10-12W @ 400Gbps; Minkenberg et al. 2021);
+#   Switch ~12 pJ/bit (Quantum-2 QM9790: 640W / 51.2Tbps; Chen et al., ISCA 2024).
+energy:
+  nvlink_intra_node_pj_per_bit: 1.3    # <=8 GPUs/node (DGX-internal)
+  nvlink_rack_scale_pj_per_bit: 5.0    # >8 GPUs/node (NVL72 copper cables)
+  ib_pj_per_bit: 70.0                  # Full IB path (NIC + optics + switch)
+  rack_scale_threshold: 8              # GPUs/node boundary for intra/rack split
+
+# Spectra (OCS) scheduling parameters. Consumed when --spectra is set.
+# `reconfig_delay` has the same units as the demand-matrix entries (bytes by default).
+spectra:
+  num_planes: 4         # s — number of parallel optical circuit switches
+  reconfig_delay: 0.01  # delta — per-permutation reconfiguration cost

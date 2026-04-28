@@ -84,7 +84,7 @@ APEX+ now models communication energy alongside compute energy using pJ/bit metr
 | Rack-scale NVLink (>8 GPUs) | 5.0 pJ/bit | NVL72 copper cables. Estimated from PAM4 SerDes class |
 | IB full path | 70.0 pJ/bit | NIC (~30) + optics (~25) + switch (~12). Derived from CX-7/QM9790 datasheets |
 
-Configure via `energy_config.yaml` (auto-loaded) or `--energy-config <path>`. Use `--frequency 1980` for compute+comm energy, `--frequency 0` for comm-only.
+Configure via `config.yaml` (auto-loaded) or `--config <path>`. Use `--frequency 1980` for compute+comm energy, `--frequency 0` for comm-only.
 
 **Key finding:** Communication energy is <1% of total for NVL64 but ~8.5% for IB, reflecting AllToAll's 5.7× latency penalty on IB. Comm-only energy ratio is 12.5× (IB vs NVL64), driven by 70 pJ/bit IB carrying 87.5% of AllToAll traffic. Total energy difference is ~8.5% (5,417 vs 4,992 KJ) because GPU compute still dominates.
 

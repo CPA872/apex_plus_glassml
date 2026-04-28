@@ -1,5 +1,11 @@
 # Profiling Computation & Communication Overheads
 
+## Changes to original profiling scripts in APEX+ simulator codebase
+- Added more GPU choices: RTX-PRO6000-BLACKWELL, and B200-SXM-192GB
+- Use NVML as the energy source, not nvidia-smi (They are probably the same though)
+- Added dtypes: bf16 
+- Use flash attention backend
+
 ## Setup
 
 Install the dependencies by running:
