@@ -6,6 +6,7 @@ import prettytable
 from tqdm import tqdm
 
 from apex_plus.execution.plan import ExecutionPlan
+from apex_plus.parallel.comm import CommType
 from apex_plus.parallel.reshard import get_reshard_comm, is_reshardable
 from apex_plus.parallel.schedule import CellSchedule, ParallelSchedule, StageSchedule
 from apex_plus.parallel.templates import get_templates
@@ -32,6 +33,7 @@ class SearchEngine:
         interconnect=None,
         moe_skew: float = 1.0,
         energy_config=None,
+        spectra_config=None,
     ) -> None:
         self.model = model
         self.cluster = cluster
@@ -39,7 +41,10 @@ class SearchEngine:
         self.dtype = dtype
         self.arch = arch
 
-        self.simulator = Simulator(model, cluster, trace, dtype, interconnect, moe_skew, energy_config)
+        self.simulator = Simulator(
+            model, cluster, trace, dtype, interconnect, moe_skew,
+            energy_config, spectra_config,
+        )
 
     def generate_schedules(
         self,
@@ -117,7 +122,17 @@ class SearchEngine:
                     num_cell_replicas = [
                         cell_schedule.num_replicas for cell_schedule in cell_schedules
                     ]
-                    if len(num_cell_replicas) > 1:
+                    # The coprime check skips "redundant" plans where matching
+                    # cell-DPs across cells could fold into model-DP. That logic
+                    # only holds when all cells use the same parallelism type.
+                    # When MoE uses true EP (AllGather / MoETemplate0) and attn
+                    # uses TP (AllReduce / MQATemplate0), the per-device sharding
+                    # is genuinely different and the plan is not redundant.
+                    has_ep_cell = any(
+                        cs.task_mapping.collective_comm.comm_type == CommType.AllGather
+                        for cs in cell_schedules
+                    )
+                    if len(num_cell_replicas) > 1 and not has_ep_cell:
                         if math.gcd(*num_cell_replicas) != 1:
                             # For a model replica, the number of cell replicas
                             # must be coprime.
@@ -229,26 +244,61 @@ class SearchEngine:
         ttft_slo = 10,
         tpot_slo = 10,
         max_batch_size = 0,
-        force_ep: int = 0) -> List[ExecutionPlan]:
+        force_ep: int = 0,
+        force_dp: int = 0,
+        force_pp: int = 0,
+        force_tp: int = 1) -> List[ExecutionPlan]:
         """Search for the best execution plan."""
         candidate_plans = self.generate_plans(self.arch, self.cluster)
+        if force_dp > 0:
+            candidate_plans = [
+                p for p in candidate_plans
+                if p.parallel_schedule.num_model_replicas == force_dp
+            ]
+        if force_pp > 0:
+            candidate_plans = [
+                p for p in candidate_plans
+                if p.parallel_schedule.num_stages == force_pp
+            ]
         if force_ep > 0:
             filtered = []
             for plan in candidate_plans:
                 stage_sched = plan.parallel_schedule.stage_schedule
-                # Find MoE EP degree.
+                # Find MoE EP degree (per-replica device count under
+                # MoETemplate0, which assigns whole experts per device and
+                # uses AllGather). Reject TP-on-experts plans
+                # (DefaultTemplate, AllReduce) — those shard each expert's
+                # filters across devices, which is not training-style EP.
                 moe_ep = None
+                stage_devices = None
+                has_moe = False
                 for cs in stage_sched.cell_schedules:
                     if cs.cell.get_name() in ("MoE", "SwiMoE"):
-                        moe_ep = cs.get_num_devices()
+                        has_moe = True
+                        if (cs.task_mapping.collective_comm.comm_type
+                                == CommType.AllGather):
+                            moe_ep = cs.task_mapping.get_num_devices()
+                            stage_devices = cs.get_num_devices()
                         break
-                if moe_ep is None or moe_ep < force_ep:
+                if has_moe:
+                    if moe_ep is None or moe_ep != force_ep:
+                        continue
+                else:
+                    # Dense model: no MoE cell. Only accept --force-ep=1
+                    # (EP > 1 has no meaning without experts).
+                    if force_ep != 1:
+                        continue
+                    # Stage_devices comes from any cell's total device count.
+                    stage_devices = stage_sched.cell_schedules[0].get_num_devices()
+                # Training constraint: attn cell-DP * attn TP = stage_devices.
+                # Pick attn cell-DP = stage_devices / force_tp so that attn TP
+                # == force_tp.
+                if force_tp <= 0 or stage_devices % force_tp != 0:
                     continue
-                # Enforce training constraint: TP × EP = total devices.
-                # Attention cell-DP must equal MoE EP, giving TP = stage_devices / EP.
+                expected_attn_dp = stage_devices // force_tp
                 attn_ok = True
                 for cs in stage_sched.cell_schedules:
-                    if cs.cell.is_attn() and cs.num_replicas != moe_ep:
+                    if cs.cell.is_attn() and cs.num_replicas != expected_attn_dp:
                         attn_ok = False
                         break
                 if attn_ok:
@@ -415,12 +465,12 @@ class SearchEngine:
             table.add_row(
                 [
                     name,
-                    f"{t / 1000000:.2f} ± {std / 1000000:.1f}",
+                    f"{t / 1000000:.6f} ± {std / 1000000:.4f}",
                     f"{t / output.total_time * 100:.1f}",
                 ]
             )
         # Add a horizontal line.
-        table.add_row(["Total", f"{output.total_time / 1000000:.2f}", "100.0"])
+        table.add_row(["Total", f"{output.total_time / 1000000:.6f}", "100.0"])
         print("* Time breakdown:")
         print(table)
         print("Energy Consumption:", f"{output.total_energy / 1000000000:.2f}", "KJ")

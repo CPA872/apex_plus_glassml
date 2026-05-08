@@ -12,6 +12,8 @@ These changes extend APEX+ to simulate large GPU configurations beyond the origi
 
 6. **Communication energy modeling** using pJ/bit metrics for NVLink and InfiniBand, with a top-level YAML config file
 
+7. **Spectra (OCS) interconnect mode** (`--interconnect spectra`) — single-tier optical circuit switch over all R GPUs, scheduled by the SPECTRA permutation-decomposition algorithm via a clean Python wrapper around the existing Julia solver. See "Spectra Interconnect Mode" section near the end of this file.
+
 Additionally, several bugs were fixed (including two pre-existing ones in Mixtral IR and the model registry) and new model configs were added for evaluation.
 
 ---
@@ -537,3 +539,118 @@ from apex_plus.simulator.expert_distribution import DirichletDistribution
 dist = DirichletDistribution(alpha=0.3, seed=42)
 matrices = extract_demand_matrices(plan, cluster, model, dtype, tokens, expert_dist=dist)
 ```
+
+---
+
+## Spectra Interconnect Mode (Single-Tier OCS)
+
+`--interconnect spectra` adds a third interconnect configuration alongside `nvlink` and `ib`. Topology: **single-tier OCS over all R GPUs** — every GPU is a leaf on the s-plane optical mesh; no NVLink hierarchy. Each fabric event's R×R bytes demand matrix is scheduled by the existing Julia-backed SPECTRA solver at `apex_plus/mesh/spectra/spectra_solver.py`.
+
+### Files Changed
+
+#### `apex_plus/simulator/comm_profile.py` — extended `SpectraConfig`
+
+Replaced the old placeholder fields (`reconfig_delay` in opaque units, no bandwidth) with a physical model parameterization:
+
+```python
+@dataclass(frozen=True)
+class SpectraConfig:
+    num_planes: int = 8                 # s — number of parallel OCS planes
+    wgs_per_gpu: int = 8                # bidirectional waveguides per GPU
+    wg_speed_gbps: float = 1024.0       # per-waveguide line rate in Gbps
+    reconfig_delay_us: float = 10.0     # delta in µs (heater-case)
+
+    @property
+    def per_port_bandwidth_GBs(self) -> float:
+        bonding = self.wgs_per_gpu / self.num_planes
+        return bonding * self.wg_speed_gbps / 8.0
+
+    @property
+    def per_port_bytes_per_us(self) -> float:
+        return self.per_port_bandwidth_GBs * 1e9 / 1e6
+```
+
+**Convention:** `wgs_per_gpu == num_planes` means one waveguide per (GPU, plane) pair (Bill Lin's panel-scale design). If `wgs_per_gpu = k × num_planes`, waveguides are bonded per plane and per-port speed scales by `k`. The SPECTRA solver consumes `per_port_bytes_per_us` to convert demand bytes → microseconds.
+
+Defaults are derived from the Apr 2026 design: `8 planes × 1024 Gbps/WG ÷ 8 = 128 GB/s per port`, ≈ 1 TB/s aggregate per-GPU egress (close to the 0.9 TB/s TX target).
+
+Also added `interconnect: InterconnectConfig` parameter to `get_comm_energy()`; for `mode == "spectra"` the function returns `0.0` with a `TODO(spectra-energy):` marker — optical-fabric `pj_per_bit` is deferred pending grounding.
+
+#### `apex_plus/simulator/spectra_sim.py` — new clean wrapper (~80 lines)
+
+Single public function:
+
+```python
+def spectra_simulate(D: np.ndarray, num_planes: int, config: SpectraConfig) -> float:
+    """Return scheduled fabric latency in microseconds for one demand matrix."""
+```
+
+This is the only Python module that imports `mesh/spectra/spectra_solver.py` (juliacall). Responsibilities:
+1. Lazy-load the Julia solver (one-time ~1-5 s startup; subsequent calls ~10-100 ms).
+2. Convert `D` (bytes) → `D_us` (microseconds) using `config.per_port_bytes_per_us`.
+3. Call `spectra_solver.spectra(D_us, s=num_planes, delta=config.reconfig_delay_us)`.
+4. Return makespan in µs.
+
+Fast paths: returns `0.0` immediately for empty / all-zero matrices.
+
+#### `apex_plus/simulator/simulator.py` — per-comm dispatch
+
+Added `spectra_config` parameter to `Simulator.__init__` (forwarded from `SearchEngine`). New helper method `_spectra_comm_time(comm_type, num_devices, num_tokens_per_rank) -> float` builds an N×N bytes demand matrix for the comm group following the same traffic patterns as `fabric_comm.build_demand_matrix`:
+
+| Collective | D[i,j] for i ≠ j |
+|---|---|
+| AllReduce | `bytes_per_rank_in` |
+| AllGather | `bytes_per_rank_in` |
+| ReduceScatter | `bytes_per_rank_in / N` |
+| AllToAll (uniform) | `bytes_per_rank_in / N` |
+
+In `get_stage_execution_time`, dispatches on `interconnect.mode`: spectra mode bypasses `get_comm_time` and calls `_spectra_comm_time` instead, using `tokens_into_comm` (the snapshot of `num_input_tokens` taken before the per-collective post-adjustments). The non-spectra path is unchanged.
+
+`get_comm_energy` now also receives `self.interconnect`; the call signature changed from 6 to 7 parameters.
+
+#### `apex_plus/search/engine.py` — forward `spectra_config`
+
+`SearchEngine.__init__` accepts `spectra_config=None` and forwards it to `Simulator(...)`. No behavioral change for nvlink/ib modes.
+
+#### `main.py` — CLI
+
+- Added `"spectra"` to `--interconnect` choices.
+- Added `--num-planes <int>` flag (overrides `spectra.num_planes` from `config.yaml`).
+- After the YAML load, applies `--num-planes` via `dataclasses.replace`.
+- Passes `spectra_config` into both encoder and decoder `SearchEngine` constructions.
+
+#### `config.yaml`
+
+```yaml
+spectra:
+  num_planes: 8
+  wgs_per_gpu: 8
+  wg_speed_gbps: 1024.0
+  reconfig_delay_us: 10.0
+  # TODO(spectra-energy): pj_per_bit deferred — energy returns 0 for spectra mode
+```
+
+#### `run_three_way.sh` — new
+
+Three back-to-back invocations on the same model/prompt/EP: NVL64, 8x8-IB, Spectra (single-tier OCS over 64 GPUs, 8 planes).
+
+### Reused Without Changes
+
+- `apex_plus/simulator/fabric_comm.py` — `iter_fabric_events` and `build_demand_matrix` already produce per-comm-step R×R demand matrices for any `ExecutionPlan`. Spectra uses the same traffic-pattern formulas as `build_demand_matrix`.
+- `apex_plus/mesh/spectra/spectra_solver.py` — Julia wrapper exposing `spectra(D, s, delta) -> (perms, durations, makespan)`.
+
+### Validation
+
+| Test | Expected | Result |
+|---|---|---|
+| Wrapper smoke (8×8 D, 4 planes, 50 GB/s) | positive µs | 1.775 µs ✓ |
+| End-to-end mixtral-8x7b, EP=8, --interconnect spectra | runs without error; AllToAll in time breakdown | 0.01 s / 2.2% ✓ |
+| Plane scaling (1 → 4 → 8 planes) | near-linear AllToAll speedup | 0.15 → 0.04 → 0.02 s ✓ |
+| Energy for spectra | 0 KJ (deferred) | 0.00 KJ ✓ |
+| nvlink / ib regression | unchanged numbers | unchanged ✓ |
+
+### Deferred (tracked with `TODO(spectra-…)` markers)
+
+- **Spectra energy.** No grounded `pj_per_bit`; `get_comm_energy` returns 0 in spectra mode. Add `pj_per_bit` to `SpectraConfig` and the matching branch in `get_comm_energy` once grounded.
+- **Non-uniform AllToAll.** The simulator's spectra branch currently uses a uniform per-pair demand matrix even when `--moe-skew` / `--moe-dist` is set. Threading an `ExpertDistribution` into `Simulator._spectra_comm_time` (the same one used by the `--demand-matrix` path) is straightforward but not done in this change.
+- **DSE / search.** Spectra runs are simulator-only; the Julia solver is too slow for inline plan ranking. If we later want spectra in plan ranking, an analytical proxy (max-column-load / per-port-BW + reconfig overhead) under spectra mode would be the path.

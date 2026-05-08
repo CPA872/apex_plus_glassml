@@ -12,7 +12,7 @@ from apex_plus.ir.transformer import Transformer
 from apex_plus.parallel.comm import CommType
 from apex_plus.parallel.schedule import StageSchedule
 from apex_plus.simulator.comm_profile import get_comm_time, get_comm_energy, get_p2p_comm_time, InterconnectConfig
-from apex_plus.simulator.comp_profile import mha_time, mlp_time, glu_time, swiglu_time
+from apex_plus.simulator.comp_profile import attn_time, mlp_time, glu_time, swiglu_time
 from apex_plus.simulator.trace import Trace, Request
 from apex_plus.utils.dtype import DTYPE
 
@@ -84,6 +84,7 @@ class Simulator:
         interconnect: InterconnectConfig = None,
         moe_skew: float = 1.0,
         energy_config=None,
+        spectra_config=None,
     ) -> None:
         self.model = model
         self.cluster = cluster
@@ -92,6 +93,7 @@ class Simulator:
         self.interconnect = interconnect
         self.moe_skew = moe_skew  # flat multiplier or 0 to use Zipf
         self.energy_config = energy_config
+        self.spectra_config = spectra_config
         self.gpu = cluster.get_device().device_type
         self.gpu_memory = cluster.get_device_memory_capacity()
         self.peak_flops = cluster.get_device().peak_flops[self.highest_prec()]
@@ -105,9 +107,11 @@ class Simulator:
         data_type.append(self.dtype["w"])
         data_type.append(self.dtype["kv"])
         data_type.append(self.dtype["act"])
-        # Dealing with mixed precesion
-        # Assuming we dequantize the value for computation
+        # Dealing with mixed precision: assume dequantize to highest before
+        # computing. Order from low to high: fp8 < bf16/fp16 < fp32.
         highest_precision = DTYPE.FLOAT8
+        if DTYPE.BFLOAT16 in data_type:
+            highest_precision = DTYPE.BFLOAT16
         if DTYPE.FLOAT16 in data_type:
             highest_precision = DTYPE.FLOAT16
         if DTYPE.FLOAT32 in data_type:
@@ -766,6 +770,52 @@ class Simulator:
             energy,
         )
 
+    def _spectra_comm_time(
+        self,
+        comm_type: CommType,
+        num_devices: int,
+        num_tokens_per_rank: int,
+    ) -> float:
+        """Per-comm latency on a single-tier OCS fabric of `num_planes` planes.
+
+        Builds an N×N bytes demand matrix for the comm group of size N, then
+        delegates to spectra_simulate. Traffic patterns mirror those produced
+        by apex_plus.simulator.fabric_comm.build_demand_matrix.
+        """
+        if num_devices <= 1 or num_tokens_per_rank <= 0:
+            return 0.0
+        if self.spectra_config is None:
+            raise RuntimeError(
+                "interconnect.mode == 'spectra' but spectra_config is None"
+            )
+
+        from apex_plus.simulator.spectra_sim import spectra_simulate
+
+        N = num_devices
+        bytes_per_token = self.model.hidden_size * self.dtype["act"].size
+        bytes_per_rank_in = num_tokens_per_rank * bytes_per_token
+
+        if comm_type in (CommType.AllReduce, CommType.AllGather):
+            # AR: each rank exchanges full input with every peer.
+            # AG: each rank's input shard is distributed to every peer.
+            per_pair = float(bytes_per_rank_in)
+        elif comm_type in (CommType.ReduceScatter, CommType.AllToAll):
+            # RS: input is reduced+scattered, per-pair = total_in / N.
+            # A2A (uniform): each source sends total_in / N to each peer.
+            # TODO(spectra-moe): non-uniform expert routing not yet wired.
+            per_pair = float(bytes_per_rank_in) / N
+        else:
+            raise NotImplementedError(
+                f"Unsupported comm type for spectra: {comm_type}"
+            )
+
+        D = np.full((N, N), per_pair, dtype=np.float64)
+        np.fill_diagonal(D, 0.0)
+
+        return spectra_simulate(
+            D, self.spectra_config.num_planes, self.spectra_config
+        )
+
     def get_stage_execution_time(
         self,
         stage_schedule: StageSchedule,
@@ -801,10 +851,20 @@ class Simulator:
             cell_execution_energy = 0.0
             task_dict = cell_schedule.task_mapping.tasks_per_device[0]
             for task_type, tasks in task_dict.items():
-                if task_type == "MHAHead" or task_type == "MQAHead":
-                    exe_time, exe_energy = mha_time(
+                _key = (i, task_type, num_devices, len(tasks), num_input_tokens,
+                        tuple(input_lens_per_attn_replica),
+                        tuple(cached_lens_per_attn_replica))
+                if _key not in getattr(self, "_op_print_seen", set()):
+                    if not hasattr(self, "_op_print_seen"):
+                        self._op_print_seen = set()
+                    self._op_print_seen.add(_key)
+                    print(f"[op] cell={i} devices={num_devices} op={task_type} "
+                          f"n_tasks={len(tasks)} tokens={num_input_tokens} "
+                          f"input_lens={input_lens_per_attn_replica} "
+                          f"cached_lens={cached_lens_per_attn_replica}")
+                if task_type in ("MHAHead", "MQAHead", "MLAHead"):
+                    exe_time, exe_energy = attn_time(
                         gpu_type,
-                        frequency,
                         tasks,
                         comp_type,
                         input_lens_per_attn_replica,
@@ -814,9 +874,8 @@ class Simulator:
                     cell_execution_time += exe_time
                     cell_execution_energy += exe_energy
                 elif task_type == "BiMHAHead":
-                    exe_time, exe_energy = mha_time(
+                    exe_time, exe_energy = attn_time(
                         gpu_type,
-                        frequency,
                         tasks,
                         comp_type,
                         input_lens_per_attn_replica,
@@ -827,19 +886,19 @@ class Simulator:
                     cell_execution_energy += exe_energy
                 elif task_type == "MLPFilter":
                     exe_time, exe_energy = mlp_time(
-                        gpu_type, frequency, tasks, comp_type, num_input_tokens
+                        gpu_type, tasks, comp_type, num_input_tokens
                     )
                     cell_execution_time += exe_time
                     cell_execution_energy += exe_energy
                 elif task_type == "GLUFilter":
                     exe_time, exe_energy = glu_time(
-                        gpu_type, frequency, tasks, comp_type, num_input_tokens
+                        gpu_type, tasks, comp_type, num_input_tokens
                     )
                     cell_execution_time += exe_time
                     cell_execution_energy += exe_energy
                 elif task_type == "SwiGLUFilter":
                     exe_time, exe_energy = swiglu_time(
-                        gpu_type, frequency, tasks, comp_type, num_input_tokens
+                        gpu_type, tasks, comp_type, num_input_tokens
                     )
                     cell_execution_time += exe_time
                     cell_execution_energy += exe_energy
@@ -850,7 +909,6 @@ class Simulator:
                     topk = cell_schedule.cell.topk
                     exe_time, exe_energy = mlp_time(
                         gpu_type,
-                        frequency,
                         tasks,
                         comp_type,
                         max(num_input_tokens * topk // num_total_experts, 1),
@@ -862,7 +920,6 @@ class Simulator:
                     topk = cell_schedule.cell.topk
                     exe_time, exe_energy = swiglu_time(
                         gpu_type,
-                        frequency,
                         tasks,
                         comp_type,
                         max(num_input_tokens * topk // num_total_experts, 1),
@@ -894,6 +951,7 @@ class Simulator:
 
                 num_input_tokens *= comm.size_factor
                 num_input_tokens = max(num_input_tokens, 1)
+                tokens_into_comm = num_input_tokens  # snapshot before post-adjustment (used by spectra)
                 if comm.comm_type == CommType.AllReduce:
                     num_elements = num_input_tokens * hidden_size
                 elif comm.comm_type == CommType.AllGather:
@@ -922,15 +980,34 @@ class Simulator:
                     raise NotImplementedError(
                         f"Unsupported comm type: {comm.comm_type}"
                     )
-                comm_time = get_comm_time(
-                    comm.comm_type,
-                    gpu_type,
-                    num_nodes,
-                    num_devices_per_node,
-                    self.dtype["act"],
-                    num_elements,
-                    self.interconnect,
+                _comm_key = (
+                    i, comm.comm_type, comm.num_devices, int(num_elements),
                 )
+                if _comm_key not in getattr(self, "_comm_print_seen", set()):
+                    if not hasattr(self, "_comm_print_seen"):
+                        self._comm_print_seen = set()
+                    self._comm_print_seen.add(_comm_key)
+                    print(f"[comm] cell={i} comm={comm.comm_type.name} "
+                          f"devices={comm.num_devices} "
+                          f"elements={int(num_elements)} "
+                          f"bytes={int(num_elements) * self.dtype['act'].size}")
+                if (
+                    self.interconnect is not None
+                    and self.interconnect.mode == "spectra"
+                ):
+                    comm_time = self._spectra_comm_time(
+                        comm.comm_type, comm.num_devices, tokens_into_comm,
+                    )
+                else:
+                    comm_time = get_comm_time(
+                        comm.comm_type,
+                        gpu_type,
+                        num_nodes,
+                        num_devices_per_node,
+                        self.dtype["act"],
+                        num_elements,
+                        self.interconnect,
+                    )
                 execution_time.append(comm_time)
                 comm_energy = get_comm_energy(
                     comm.comm_type,
@@ -939,6 +1016,7 @@ class Simulator:
                     self.dtype["act"],
                     num_elements,
                     self.energy_config,
+                    self.interconnect,
                 )
                 execution_energy.append(comm_energy)
 

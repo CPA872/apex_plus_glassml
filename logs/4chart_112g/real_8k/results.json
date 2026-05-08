@@ -1,0 +1,112 @@
+{
+  "config": {
+    "matrices_dir": "/mnt/alpha/yuepan/glassml/profiling/qwen3-235b/output/ep64/8k/per_layer",
+    "synth_uniform": false,
+    "seqlen": null,
+    "layer_file": "traffic_matrix_ep64_8k_layer46.txt",
+    "matrix_size": 64,
+    "skew": {
+      "row_max_over_mean": 1.0176082870012497,
+      "col_max_over_mean": 4.594187389856808,
+      "pair_max_over_mean": 7.404742253705776,
+      "cv": 0.8858233189804693,
+      "total_MB": 31930.507264
+    },
+    "planes": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32
+    ],
+    "reconfig_delay_us": 10.0,
+    "wgs_per_gpu": 8,
+    "wg_speed_gbps": 3584.0,
+    "nvlink_bw_GBs": 900.0,
+    "ib_rail_bw_GBs": 50.0,
+    "ib_latency_us": 3.0
+  },
+  "results": [
+    {
+      "label": "nvlink (1x64)",
+      "total_sec": 0.002546783573333333,
+      "breakdown": {
+        "AllToAll": 0.002546783573333333
+      },
+      "per_layer_us": [
+        2546.783573333333
+      ]
+    },
+    {
+      "label": "ib (8x8)",
+      "total_sec": 0.00573326304,
+      "breakdown": {
+        "AllToAll": 0.00573326304
+      },
+      "per_layer_us": [
+        5733.26304
+      ]
+    },
+    {
+      "label": "spectra s=1",
+      "total_sec": 0.001272601142857143,
+      "breakdown": {
+        "AllToAll": 0.001272601142857143
+      },
+      "per_layer_us": [
+        1272.601142857143
+      ]
+    },
+    {
+      "label": "spectra s=2",
+      "total_sec": 0.0009626011428571428,
+      "breakdown": {
+        "AllToAll": 0.0009626011428571428
+      },
+      "per_layer_us": [
+        962.6011428571428
+      ]
+    },
+    {
+      "label": "spectra s=4",
+      "total_sec": 0.0008066925714285714,
+      "breakdown": {
+        "AllToAll": 0.0008066925714285714
+      },
+      "per_layer_us": [
+        806.6925714285713
+      ]
+    },
+    {
+      "label": "spectra s=8",
+      "total_sec": 0.0007313634285714286,
+      "breakdown": {
+        "AllToAll": 0.0007313634285714286
+      },
+      "per_layer_us": [
+        731.3634285714286
+      ]
+    },
+    {
+      "label": "spectra s=16",
+      "total_sec": 0.0006921811428571428,
+      "breakdown": {
+        "AllToAll": 0.0006921811428571428
+      },
+      "per_layer_us": [
+        692.1811428571428
+      ]
+    },
+    {
+      "label": "spectra s=32",
+      "total_sec": 0.0006722411428571427,
+      "breakdown": {
+        "AllToAll": 0.0006722411428571427
+      },
+      "per_layer_us": [
+        672.2411428571428
+      ]
+    }
+  ]
+}

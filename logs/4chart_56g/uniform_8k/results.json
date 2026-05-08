@@ -1,0 +1,112 @@
+{
+  "config": {
+    "matrices_dir": null,
+    "synth_uniform": true,
+    "seqlen": 8192,
+    "layer_file": "synth_uniform_seq8192.synth",
+    "matrix_size": 64,
+    "skew": {
+      "row_max_over_mean": 1.0,
+      "col_max_over_mean": 1.0,
+      "pair_max_over_mean": 1.0,
+      "cv": 0.0,
+      "total_MB": 33822.867456
+    },
+    "planes": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32
+    ],
+    "reconfig_delay_us": 10.0,
+    "wgs_per_gpu": 8,
+    "wg_speed_gbps": 1792.0,
+    "nvlink_bw_GBs": 900.0,
+    "ib_rail_bw_GBs": 50.0,
+    "ib_latency_us": 3.0
+  },
+  "results": [
+    {
+      "label": "nvlink (1x64)",
+      "total_sec": 0.0005872025599999999,
+      "breakdown": {
+        "AllToAll": 0.0005872025599999999
+      },
+      "per_layer_us": [
+        587.20256
+      ]
+    },
+    {
+      "label": "ib (8x8)",
+      "total_sec": 0.00132420576,
+      "breakdown": {
+        "AllToAll": 0.00132420576
+      },
+      "per_layer_us": [
+        1324.20576
+      ]
+    },
+    {
+      "label": "spectra s=1",
+      "total_sec": 0.0009249119999999993,
+      "breakdown": {
+        "AllToAll": 0.0009249119999999993
+      },
+      "per_layer_us": [
+        924.9119999999994
+      ]
+    },
+    {
+      "label": "spectra s=2",
+      "total_sec": 0.0006149119999999996,
+      "breakdown": {
+        "AllToAll": 0.0006149119999999996
+      },
+      "per_layer_us": [
+        614.9119999999996
+      ]
+    },
+    {
+      "label": "spectra s=4",
+      "total_sec": 0.00045959314285714295,
+      "breakdown": {
+        "AllToAll": 0.00045959314285714295
+      },
+      "per_layer_us": [
+        459.59314285714294
+      ]
+    },
+    {
+      "label": "spectra s=8",
+      "total_sec": 0.00037959314285714295,
+      "breakdown": {
+        "AllToAll": 0.00037959314285714295
+      },
+      "per_layer_us": [
+        379.59314285714294
+      ]
+    },
+    {
+      "label": "spectra s=16",
+      "total_sec": 0.0003395931428571429,
+      "breakdown": {
+        "AllToAll": 0.0003395931428571429
+      },
+      "per_layer_us": [
+        339.5931428571429
+      ]
+    },
+    {
+      "label": "spectra s=32",
+      "total_sec": 0.0003195931428571429,
+      "breakdown": {
+        "AllToAll": 0.0003195931428571429
+      },
+      "per_layer_us": [
+        319.5931428571429
+      ]
+    }
+  ]
+}

@@ -415,14 +415,14 @@ class GpuHost:
         #     for k in [1, 2, 4]:
         #         self.profile_allgather(1 << i, data_type, [list(range(0, self.world_size, k))], file_path)
 
-        # # All-to-all
-        # file_path = "alltoall.csv"
-        # with open(file_path, 'w', encoding='UTF8') as f:
-        #     writer = csv.writer(f)
-        #     writer.writerow(header)
-        # for i in range(8, 27):
-        #     for k in [1, 2, 4]:
-        #         self.profile_alltoall(1 << i, data_type, [list(range(0, self.world_size, k))], file_path)
+        # All-to-all
+        file_path = "alltoall.csv"
+        with open(file_path, 'w', encoding='UTF8') as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+        for i in range(8, 27):
+            for k in [1, 2, 4]:
+                self.profile_alltoall(1 << i, data_type, [list(range(0, self.world_size, k))], file_path)
 
         # # Reduce-Scatter
         # file_path = "reduce_scatter.csv"

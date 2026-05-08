@@ -33,8 +33,53 @@ class EnergyConfig:
 
 @dataclass(frozen=True)
 class SpectraConfig:
-    num_planes: int = 4          # s — number of parallel OCS planes
-    reconfig_delay: float = 0.01 # delta — per-perm reconfig cost (units = demand-matrix entry units)
+    """Single-tier OCS fabric parameters.
+
+    Physical model (Lin et al., panel-scale glass design, Apr 2026):
+      - Each GPU has `wgs_per_gpu` bidirectional waveguides.
+      - Each waveguide carries `wg_speed_gbps` gigabits per second.
+      - Waveguides are distributed across `num_planes` parallel OCS planes.
+
+    Convention: when wgs_per_gpu == num_planes, each (GPU, plane) pair owns
+    exactly one waveguide and the per-port (per GPU per plane) bandwidth is
+    `wg_speed_gbps / 8` GB/s. If wgs_per_gpu > num_planes, waveguides are
+    bonded per plane and per-port bandwidth scales as
+    (wgs_per_gpu / num_planes) * wg_speed_gbps / 8.
+
+    The SPECTRA solver schedules a bytes-valued demand matrix; the wrapper
+    converts bytes → microseconds using the per-port bandwidth.
+    """
+
+    num_planes: int = 8                 # s — number of parallel OCS planes (Bill's design: 8 for powers-of-2 plot)
+    wgs_per_gpu: int = 8                # waveguides per GPU; equal to num_planes in baseline design
+    wg_speed_gbps: float = 1024.0       # per-waveguide line rate in Gbps (~1.029 Tb/s in design, rounded)
+    reconfig_delay_us: float = 10.0     # delta in µs — heater-case OCS reconfiguration delay
+    # TODO(spectra-energy): pj_per_bit for optical fabric is deferred; energy returns 0 for spectra mode
+
+    @property
+    def per_port_bandwidth_GBs(self) -> float:
+        """Per-(GPU, plane) port bandwidth in GB/s (consumed by the solver)."""
+        if self.num_planes <= 0:
+            return 0.0
+        bonding = self.wgs_per_gpu / self.num_planes
+        return bonding * self.wg_speed_gbps / 8.0
+
+    @property
+    def per_port_bytes_per_us(self) -> float:
+        """Per-port bandwidth in bytes/µs."""
+        return self.per_port_bandwidth_GBs * 1e9 / 1e6
+
+    @property
+    def aggregate_plane_bandwidth_GBs(self) -> float:
+        """Per-plane aggregate ingress/egress bandwidth in GB/s, given R GPUs.
+
+        Note: this is descriptive (= R × per_port_GBs) and not consumed
+        directly by the SPECTRA solver, which works in per-port units.
+        Provided as a documented helper.
+        """
+        # R is fabric-dependent; callers multiply by R themselves if needed.
+        # Returned value is "per port" as a stand-in.
+        return self.per_port_bandwidth_GBs
 
 _COMM_TYPE_TO_OP_KIND = {
     CommType.AllGather: "allgather",
@@ -100,20 +145,33 @@ def _extract_bandwidth_and_latency(
     """Extract per-GPU algo bandwidth and latency from reference N-GPU profiled data."""
     df = _load_table(op_kind, gpu)
 
+    # bf16 and fp16 have identical byte volume and identical NCCL throughput,
+    # so accept either when the profile only has one of them.
+    dtype_aliases = [dtype_str]
+    if dtype_str == "bfloat16":
+        dtype_aliases.append("half")
+    elif dtype_str == "half":
+        dtype_aliases.append("bfloat16")
+
     # Try ref_n, then fall back to smaller counts
+    ref_df = None
     for n in [ref_n, 4, 2]:
-        ref_df = df[
-            (df["num_nodes"] == 1)
-            & (df["num_gpus_per_node"] == n)
-            & (df["dtype"] == dtype_str)
-        ]
-        if not ref_df.empty:
-            ref_n = n
+        for d in dtype_aliases:
+            cand = df[
+                (df["num_nodes"] == 1)
+                & (df["num_gpus_per_node"] == n)
+                & (df["dtype"] == d)
+            ]
+            if not cand.empty:
+                ref_df = cand
+                ref_n = n
+                break
+        if ref_df is not None:
             break
-    else:
+    if ref_df is None:
         raise ValueError(
             f"No reference data found for analytical model: "
-            f"op={op_kind}, gpu={gpu}, dtype={dtype_str}"
+            f"op={op_kind}, gpu={gpu}, dtype in {dtype_aliases}"
         )
 
     ref_df = ref_df.sort_values("size(kb)")
@@ -315,12 +373,20 @@ def get_comm_time(
     dtype_str = "half" if dtype == DTYPE.FLOAT8 else dtype_to_str(dtype)
     size = num_elements * dtype.size // KB
 
-    df_filtered = df[df["num_nodes"] == num_nodes]
-    df_filtered = df_filtered[df_filtered["num_gpus_per_node"] == num_gpus_per_node]
-    df_filtered = df_filtered[df_filtered["dtype"] == dtype_str]
+    # bf16 and fp16 have identical NCCL throughput at the same byte volume.
+    # Try the requested dtype first, fall through to its alias.
+    dtype_candidates = [dtype_str]
+    if dtype_str == "bfloat16":
+        dtype_candidates.append("half")
+    elif dtype_str == "half":
+        dtype_candidates.append("bfloat16")
 
-    if not df_filtered.empty:
-        return _interpolate(df_filtered, "size(kb)", size, "time(us)")
+    df_base = df[df["num_nodes"] == num_nodes]
+    df_base = df_base[df_base["num_gpus_per_node"] == num_gpus_per_node]
+    for d in dtype_candidates:
+        df_filtered = df_base[df_base["dtype"] == d]
+        if not df_filtered.empty:
+            return _interpolate(df_filtered, "size(kb)", size, "time(us)")
 
     # Analytical fallback for unprofiled GPU counts (NVLink domain)
     return _analytical_comm_time(
@@ -335,7 +401,11 @@ def get_comm_energy(
     dtype: DTYPE,
     num_elements: int,
     energy_config: EnergyConfig = None,
+    interconnect: InterconnectConfig = None,
 ) -> float:
+    # TODO(spectra-energy): no grounded pj_per_bit for optical fabric yet; return 0 for spectra mode.
+    if interconnect is not None and interconnect.mode == "spectra":
+        return 0.0
     """Return communication energy in microjoules (uJ) for one comm group.
 
     Energy = total_bytes_moved_across_all_GPUs * 8 bits/byte * pJ_per_bit,

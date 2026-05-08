@@ -1,0 +1,14 @@
+gpu,num_nodes,num_gpus_per_node,dtype,size(kb),time(us),gpu_freq
+H100-SXM-80GB,2,1,half,0,45,0
+H100-SXM-80GB,2,1,half,1,39,0
+H100-SXM-80GB,2,1,half,2,41,0
+H100-SXM-80GB,2,1,half,4,46,0
+H100-SXM-80GB,2,1,half,8,48,0
+H100-SXM-80GB,2,1,half,16,49,0
+H100-SXM-80GB,2,1,half,32,50,0
+H100-SXM-80GB,2,1,half,64,57,0
+H100-SXM-80GB,2,1,half,128,64,0
+H100-SXM-80GB,2,1,half,256,72,0
+H100-SXM-80GB,2,1,half,512,87,0
+H100-SXM-80GB,2,1,half,1024,153,0
+H100-SXM-80GB,2,1,half,2048,283,0

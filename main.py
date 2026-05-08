@@ -10,36 +10,13 @@ from apex_plus.simulator.comm_profile import EnergyConfig, InterconnectConfig, S
 from apex_plus.simulator.trace import Trace
 from apex_plus.utils.dtype import DTYPE, _DTYPE_REGISTRY
 
-# NOTE: This is not a complete list of supported models.
+## NOTE: used for --model argument in CLI, mapped to JSON config path under ../models/.
 SHORTCUT = {
-    "bloom": "bigscience/bloom",
-    "llama-7b": "huggyllama/llama-7b",
-    "llama-13b": "huggyllama/llama-13b",
-    "llama-30b": "huggyllama/llama-30b",
-    "llama-65b": "huggyllama/llama-65b",
-    "gpt-j": "EleutherAI/gpt-j-6b",
-    "gpt-neox": "EleutherAI/gpt-neox-20b",
-    "wizardcoder": "WizardLM/WizardCoder-15B-V1.0",
-    "whisper": "openai/whisper-large-v3",
-    "clip": "openai/clip-vit-large-patch14",
-    # HF authentication token is needed if there is local config.json file
-    # Configuration file can be taken from HF model repo
-    "mistral-7b-local": "./apex_plus/models/mistral_config.json",
-    "mistral-7b": "teknium/OpenHermes-2.5-Mistral-7B",
-    "t5": "google/flan-t5-xxl",
-    "llama3-70b": "./apex_plus/models/llama3_70b_config.json",
-    "mixtral-8x7b-local": "./apex_plus/models/mixtral8x7b_config.json",
-    "mixtral-8x7b": "cognitivecomputations/dolphin-2.5-mixtral-8x7b",
-    "mixtral-8x22b-local": "./apex_plus/models/mixtral8x22b_config.json",
-    "mixtral-8x22b": "mistral-community/Mixtral-8x22B-v0.1-AWQ",
-    "llama3.1-70b": "./apex_plus/models/llama3.1_70b_config.json",
-    "llama3.1-405b": "./apex_plus/models/llama3.1_405b_config.json",
-    "moe-64x": "./apex_plus/models/moe_64x_config.json",
-    "moe-64x-large": "./apex_plus/models/moe_64x_large_config.json",
-    "deepseek-v2": "./apex_plus/models/deepseek_v2_config.json",
-    "deepseek-v3": "./apex_plus/models/deepseek_v3_config.json",
-    "kimi-k2": "./apex_plus/models/kimi_k2_config.json",
-    "qwen3-235b": "./apex_plus/models/qwen3_235b_a22b_config.json",
+    "deepseek-v3": "../models/deepseek-v3.json",
+    "kimi-k2": "../models/kimi-k2.json",
+    "qwen3-235b": "../models/qwen3-235b-a22b.json",
+    "qwen3-30b-a3b": "../models/qwen3-30b-a3b.json",
+    "qwen3-32b": "../models/qwen3-32b.json",
 }
 
 
@@ -50,10 +27,36 @@ def get_model_shortcuts():
 def main(args: argparse.Namespace):
     if args.model in SHORTCUT:
         args.model = SHORTCUT[args.model]
+
+    if args.microbatch_size > 0:
+        args.num_requests = args.microbatch_size * args.force_dp
+
     print(args)
 
+    total = args.num_nodes * args.num_gpus_per_node
+    product = args.force_dp * args.force_pp * args.force_tp * args.force_ep
+    if product != total:
+        raise ValueError(
+            f"force_dp * force_pp * force_tp * force_ep "
+            f"({args.force_dp} * {args.force_pp} * {args.force_tp} * {args.force_ep} "
+            f"= {product}) must equal total devices "
+            f"({args.num_nodes} * {args.num_gpus_per_node} = {total})."
+        )
+
+    print("=" * 80)
+    print(f"[batch] microbatch_size = {args.num_requests // args.force_dp} "
+          f"(per-DP-rank, sequences)")
+    print(f"[batch] DP             = {args.force_dp}")
+    print(f"[batch] num_requests   = {args.num_requests} "
+          f"(global batch = microbatch * DP)")
+    print(f"[batch] prompt_len     = {args.prompt_len}")
+    print(f"[batch] tokens / step  = {args.num_requests * args.prompt_len} "
+          f"(global)")
+    print("=" * 80)
+
     model, model_config = get_model_ir(
-        args.model, args.num_experts, args.topk, args.capacity_factor
+        args.model, args.num_experts, args.topk, args.capacity_factor,
+        num_layers_override=args.num_layers_override,
     )
 
     encoder_cluster = Cluster.from_gpu(args.gpu, args.num_nodes, 1)
@@ -97,11 +100,19 @@ def main(args: argparse.Namespace):
             k: v for k, v in spectra_cfg.items() if k in SpectraConfig.__dataclass_fields__
         })
 
+    if args.num_planes is not None:
+        # CLI override takes precedence over YAML.
+        from dataclasses import replace
+        spectra_config = replace(spectra_config, num_planes=args.num_planes)
+    if args.reconfig_delay_us is not None:
+        from dataclasses import replace
+        spectra_config = replace(spectra_config, reconfig_delay_us=args.reconfig_delay_us)
+
     if model.num_encoder_blocks == 0 and model.num_decoder_blocks == 0:
         raise RuntimeError("Number of encoders and decoders cannot both be zero.")
     if model.num_encoder_blocks > 0:
         engine = SearchEngine(
-            model, encoder_cluster, trace, "encoder", dtype, interconnect, args.moe_skew, energy_config
+            model, encoder_cluster, trace, "encoder", dtype, interconnect, args.moe_skew, energy_config, spectra_config
         )  # search for encoder
         _, trace = engine.search(
             args.all,
@@ -113,11 +124,14 @@ def main(args: argparse.Namespace):
             args.tpot_slo,
             args.max_batch_size,
             args.force_ep,
+            args.force_dp,
+            args.force_pp,
+            args.force_tp,
         )  # updated traces by adding encode time
         trace = Trace(trace)
     if model.num_decoder_blocks > 0:
         engine = SearchEngine(
-            model, cluster, trace, "decoder", dtype, interconnect, args.moe_skew, energy_config
+            model, cluster, trace, "decoder", dtype, interconnect, args.moe_skew, energy_config, spectra_config
         )  # search for decoder
         best_plans, trace = engine.search(
             args.all,
@@ -129,6 +143,9 @@ def main(args: argparse.Namespace):
             args.tpot_slo,
             args.max_batch_size,
             args.force_ep,
+            args.force_dp,
+            args.force_pp,
+            args.force_tp,
         )
 
         if args.demand_matrix and best_plans:
@@ -220,22 +237,48 @@ if __name__ == "__main__":
     parser.add_argument(
         "--gpu",
         type=str,
-        choices=["V100-PCIE-16GB", "H100-SXM-80GB","H200-SXM-141GB",],
+        choices=[
+            "V100-PCIE-16GB",
+            "H100-SXM-80GB",
+            "H200-SXM-141GB",
+            "B200-SXM-192GB",
+        ],
         default="H100-SXM-80GB",
     )
     parser.add_argument("--frequency", type=int, choices=[0, 810, 1980], default=0)
     parser.add_argument(
         "--interconnect",
         type=str,
-        choices=["nvlink", "ib"],
+        choices=["nvlink", "ib", "spectra"],
         default=None,
-        help="Inter-node interconnect type. Default: nvlink if single-node, ib if multi-node.",
+        help="Interconnect type. Default: nvlink if single-node, ib if multi-node. "
+             "'spectra' models a single-tier optical circuit switch over all R GPUs.",
     )
     parser.add_argument(
         "--ib-rails",
         type=int,
         default=8,
         help="Number of IB rails (NICs) per node. DGX H100 has 8. Default: 8.",
+    )
+    parser.add_argument(
+        "--num-planes",
+        type=int,
+        default=None,
+        help="Number of OCS planes for --interconnect spectra. Overrides config.yaml.",
+    )
+    parser.add_argument(
+        "--reconfig-delay-us",
+        type=float,
+        default=None,
+        help="Per-permutation OCS reconfig delay (µs) for --interconnect spectra. Overrides config.yaml.",
+    )
+    parser.add_argument(
+        "--num-layers-override",
+        type=int,
+        default=None,
+        help="Override the model's num_hidden_layers (e.g. 1 for fast sweeps). "
+             "In steady state, per-layer time is invariant so the comm/compute "
+             "ratio is preserved.",
     )
     # Workload config
     parser.add_argument("--trace-file", type=str)
@@ -245,7 +288,18 @@ if __name__ == "__main__":
         "--num-requests",
         type=int,
         default=1024,
-        help="Number of requests to feed into the APEX. Large number of requests increase simulation accuracy but also increases latency of simulation execution.",
+        help="Number of requests to feed into the APEX (global batch across DP). "
+             "Large number of requests increases simulation accuracy but also "
+             "increases simulation latency. Use --microbatch-size for per-DP-rank "
+             "framing (Megatron/DeepSpeed convention).",
+    )
+    parser.add_argument(
+        "--microbatch-size",
+        type=int,
+        default=0,
+        help="Per-DP-rank micro-batch size in sequences. If > 0, overrides "
+             "--num-requests with microbatch_size * force_dp. Matches the "
+             "Megatron/DeepSpeed `micro_batch_size` convention.",
     )
     # Misc
     parser.add_argument(
@@ -253,18 +307,25 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable Ray and serialize the execution of " "simulation.",
     )
-    # Quantization
+    # Quantization. Defaults are bf16 to match training-time dtype and the
+    # FlashAttention profile (which currently sweeps bf16 only).
     parser.add_argument(
-        "--kv-dtype", type=str, choices=["float", "half", "float8"], default="half"
+        "--kv-dtype",
+        type=str,
+        choices=["float", "half", "bfloat16", "float8"],
+        default="bfloat16",
     )
     parser.add_argument(
-        "--weight-dtype", type=str, choices=["float", "half", "float8"], default="half"
+        "--weight-dtype",
+        type=str,
+        choices=["float", "half", "bfloat16", "float8"],
+        default="bfloat16",
     )
     parser.add_argument(
         "--activation-dtype",
         type=str,
-        choices=["float", "half", "float8"],
-        default="half",
+        choices=["float", "half", "bfloat16", "float8"],
+        default="bfloat16",
     )
 
     # Output config
@@ -311,9 +372,29 @@ if __name__ == "__main__":
     parser.add_argument(
         "--force-ep",
         type=int,
-        default=0,
-        help="Force minimum expert parallelism degree with training constraint (TP x EP = total). "
-             "Filters plans where MoE EP < this value or attention cell-DP != EP.",
+        default=1,
+        help="Force exact expert parallelism degree. Default 1 (no EP). "
+             "Filters plans where MoE EP != this value.",
+    )
+    parser.add_argument(
+        "--force-dp",
+        type=int,
+        default=1,
+        help="Force exact data-parallel (model replica) count. Default 1.",
+    )
+    parser.add_argument(
+        "--force-pp",
+        type=int,
+        default=1,
+        help="Force exact pipeline-parallel (number of stages) count. Default 1.",
+    )
+    parser.add_argument(
+        "--force-tp",
+        type=int,
+        default=1,
+        help="Force exact tensor-parallel degree. Default 1. Under the current "
+             "training constraint, attention TP is always 1; this knob exists "
+             "for parallelism-spec parity. Validated against DP*PP*TP*EP = total.",
     )
     parser.add_argument(
         "--moe-skew",

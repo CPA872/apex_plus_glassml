@@ -19,8 +19,20 @@ energy:
   ib_pj_per_bit: 70.0                  # Full IB path (NIC + optics + switch)
   rack_scale_threshold: 8              # GPUs/node boundary for intra/rack split
 
-# Spectra (OCS) scheduling parameters. Consumed when --spectra is set.
-# `reconfig_delay` has the same units as the demand-matrix entries (bytes by default).
+# Spectra (OCS) scheduling parameters. Consumed when --interconnect spectra is set.
+#
+# Physical model (Lin et al., panel-scale glass design, Apr 2026):
+#   - Each GPU has `wgs_per_gpu` bidirectional waveguides.
+#   - Each waveguide carries `wg_speed_gbps` Gbps (gigabits/sec).
+#   - Waveguides are distributed across `num_planes` parallel OCS planes; in the
+#     baseline design wgs_per_gpu == num_planes (one waveguide per plane per GPU).
+#   - Per-port bandwidth (used by the solver) = wg_speed_gbps / 8 GB/s.
+#
+# Defaults match the design point: 8 planes × 1024 Gbps per waveguide → 128 GB/s
+# per port, ≈ 1 TB/s aggregate per-GPU egress (close to the 0.9 TB/s TX target).
 spectra:
-  num_planes: 4         # s — number of parallel optical circuit switches
-  reconfig_delay: 0.01  # delta — per-permutation reconfiguration cost
+  num_planes: 8              # s — number of parallel OCS planes (8 for powers-of-2 plot)
+  wgs_per_gpu: 8             # bidirectional waveguides per GPU (= num_planes in baseline design)
+  wg_speed_gbps: 1024.0      # per-waveguide line rate in Gbps (~1.029 Tb/s in design)
+  reconfig_delay_us: 10.0    # delta in µs — heater-case OCS reconfiguration delay
+  # TODO(spectra-energy): pj_per_bit for optical fabric is deferred — energy currently returns 0 for spectra mode

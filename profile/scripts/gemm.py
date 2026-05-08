@@ -24,6 +24,44 @@ K = [1 << i for i in range(17)]
 N = list(range(1, 128)) + [128 * i for i in range(1, 513)]
 
 
+def _build_gemm_fn(m: int, k: int, n: int, dtype: str):
+    """Return a no-arg callable that runs one GEMM of the given shape/dtype.
+
+    fp8 takes the e4m3fn _scaled_mm path with bf16 output and unit scales;
+    cuBLASLt requires k % 16 == 0 and n % 16 == 0 for that path.
+    """
+    if dtype in ("half", "fp16"):
+        x = torch.randn(m, k, device="cuda", dtype=torch.float16)
+        y = torch.randn(k, n, device="cuda", dtype=torch.float16)
+        return lambda: torch.matmul(x, y)
+    if dtype in ("bf16", "bfloat16"):
+        x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+        y = torch.randn(k, n, device="cuda", dtype=torch.bfloat16)
+        return lambda: torch.matmul(x, y)
+    if dtype == "float":
+        x = torch.randn(m, k, device="cuda", dtype=torch.float32)
+        y = torch.randn(k, n, device="cuda", dtype=torch.float32)
+        return lambda: torch.matmul(x, y)
+    if dtype in ("fp8", "fp8_e4m3"):
+        if k % 16 or n % 16:
+            raise ValueError(
+                f"fp8 requires k and n divisible by 16; got m={m} k={k} n={n}"
+            )
+        x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16).to(
+            torch.float8_e4m3fn
+        )
+        # _scaled_mm needs B in column-major layout; build as (n,k) then .t().
+        y = torch.randn(n, k, device="cuda", dtype=torch.bfloat16).to(
+            torch.float8_e4m3fn
+        ).t()
+        scale_a = torch.tensor(1.0, device="cuda")
+        scale_b = torch.tensor(1.0, device="cuda")
+        return lambda: torch._scaled_mm(
+            x, y, scale_a=scale_a, scale_b=scale_b, out_dtype=torch.bfloat16
+        )
+    raise ValueError(f"Invalid dtype: {dtype}")
+
+
 @ray.remote(num_gpus=1)
 class GemmProfiler:
 
@@ -43,17 +81,7 @@ class GemmProfiler:
             self.handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
 
     def _profile(self, m: int, k: int, n: int, dtype: str) -> Tuple[float, float]:
-        if dtype == "half":
-            dtype = torch.float16
-        elif dtype == "bfloat16":
-            dtype = torch.bfloat16
-        elif dtype == "float":
-            dtype = torch.float32
-        else:
-            raise ValueError(f"Invalid dtype: {dtype}")
-
-        x = torch.randn(m, k, device="cuda", dtype=dtype)
-        y = torch.randn(k, n, device="cuda", dtype=dtype)
+        gemm_fn = _build_gemm_fn(m, k, n, dtype)
 
         tag = f"m{m}_k{k}_n{n}"
         power_log_file = f"power_log_{self.idx}.csv"
@@ -61,13 +89,13 @@ class GemmProfiler:
 
         # Warmup
         for _ in range(NUM_WARMUP):
-            torch.matmul(x, y)
+            gemm_fn()
         torch.cuda.synchronize()
 
         # Measure
         start = time.time()
         for _ in range(NUM_ITER):
-            torch.matmul(x, y)
+            gemm_fn()
         torch.cuda.synchronize()
         end = time.time()
 
@@ -172,7 +200,14 @@ class GemmProfiler:
                             i = mi * len(K) * len(N) + ki * len(N) + ni
                             if i % self.num_gpus != self.idx:
                                 continue
-                            t, avg_power = self._profile(m, k, n, dtype)
+                            try:
+                                t, avg_power = self._profile(m, k, n, dtype)
+                            except (ValueError, RuntimeError) as e:
+                                # FP8 alignment (k/n %16) and cuBLAS layout
+                                # constraints fail for some small shapes; skip
+                                # rather than abort the sweep.
+                                print(f"skip dtype={dtype} m={m} k={k} n={n}: {e}")
+                                continue
                             avg_energy = int(t) * avg_power
                             data.append(
                                 (
@@ -239,7 +274,12 @@ if __name__ == "__main__":
         "--gpu", type=str, required=True, choices=["V100-PCIE-16GB", "H100-SXM-80GB", "RTX-PRO6000-BLACKWELL", "B200-SXM-192GB"]
     )
     parser.add_argument("--num-gpus", type=int, required=True)
-    parser.add_argument("--dtype", type=str, default="half", choices=["half", "bfloat16", "float"])
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default="half",
+        choices=["half", "fp16", "bfloat16", "bf16", "float", "fp8", "fp8_e4m3"],
+    )
     args = parser.parse_args()
 
     print(args)

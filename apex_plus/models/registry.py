@@ -17,6 +17,9 @@ from apex_plus.models.mistral import Mistral
 from apex_plus.models.mixtral import Mixtral
 from apex_plus.models.t5 import T5
 from apex_plus.models.llama3 import LLaMA3
+from apex_plus.models.deepseek_v3 import DeepseekV3
+from apex_plus.models.qwen3 import Qwen3
+from apex_plus.models.qwen3_moe import Qwen3Moe
 
 _MODEL_REGISTRY = {
     "BloomForCausalLM": Bloom,
@@ -32,6 +35,9 @@ _MODEL_REGISTRY = {
     "MixtralForCausalLM": Mixtral,
     "T5ForConditionalGeneration": T5,
     "Llama3ForCausalLM": LLaMA3,
+    "Qwen3MoeForCausalLM": Qwen3Moe,
+    "Qwen3ForCausalLM": Qwen3,
+    "DeepseekV3ForCausalLM": DeepseekV3,
 }
 
 
@@ -44,8 +50,13 @@ def get_model_ir(
     num_experts: Optional[int],
     topk: int,
     capacity_factor: float,
+    num_layers_override: Optional[int] = None,
 ) -> Transformer:
     config = AutoConfig.from_pretrained(model_name)
+    if num_layers_override is not None and num_layers_override > 0:
+        # Truncate the model for fast sweeps. Per-layer time is invariant in
+        # steady state, so the breakdown ratio is preserved.
+        config.num_hidden_layers = num_layers_override
     if len(config.architectures) > 1:
         raise ValueError("Only single architecture models are supported")
 
@@ -54,14 +65,25 @@ def get_model_ir(
         raise ValueError(f"Model architecture {arch} not supported")
 
     # Native MoE architectures that read expert config from HF config.json
-    _NATIVE_MOE_ARCHS = {"MixtralForCausalLM"}
+    _NATIVE_MOE_ARCHS = {
+        "MixtralForCausalLM",
+        "Qwen3MoeForCausalLM",
+        "DeepseekV3ForCausalLM",
+    }
     # Dense architectures that support conversion to MoE via extra args
     _MOE_CONVERTIBLE_ARCHS = {"OPTForCausalLM": OPTMoE}
 
     if arch in _NATIVE_MOE_ARCHS:
+        # Field names vary: Mixtral=num_local_experts, Qwen3-MoE=num_experts,
+        # DSv3/Kimi=n_routed_experts. Try in that order.
+        ne = (
+            getattr(config, "num_local_experts", None)
+            or getattr(config, "num_experts", None)
+            or getattr(config, "n_routed_experts", 8)
+        )
         model = _MODEL_REGISTRY[arch].from_hf(
             config,
-            num_experts=getattr(config, "num_local_experts", 8),
+            num_experts=ne,
             topk=getattr(config, "num_experts_per_tok", 2),
             capacity_factor=capacity_factor,
         )

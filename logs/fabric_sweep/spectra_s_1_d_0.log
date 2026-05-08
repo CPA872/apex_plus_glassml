@@ -1,0 +1,73 @@
+Namespace(model='./apex_plus/models/deepseek_v3_config.json', num_experts=None, topk=2, capacity_factor=1.0, num_nodes=1, num_gpus_per_node=64, gpu='H100-SXM-80GB', frequency=1980, interconnect='spectra', ib_rails=8, num_planes=1, reconfig_delay_us=0.0, trace_file=None, prompt_len=16384, output_len=1, num_requests=4096, disable_ray=False, kv_dtype='half', weight_dtype='half', activation_dtype='half', all=False, request_percentiles=[], token_percentiles=[], ttft_slo=10, tpot_slo=10, max_batch_size=0, force_ep=64, moe_skew=0.0, moe_dist=None, moe_dist_param=None, demand_matrix=None, dm_num_tokens=None, config=None)
+Generated 2 decoder candidate plans.
+================================================================================
+* Optimal schedule for decoder:
+  # Model replicas: 1
+  # Stages: 1
+  # Blocks per stage: 61
+------------------------------------------------------------------------------------
+  Name            Value                                                             
+------------------------------------------------------------------------------------
+  MQA             64 replicas, TaskMapping(tasks_per_device={'MQAHead': 112})x1     
+  ReduceScatter   1 devices                                                         
+  AllToAll        64 devices                                                        
+  SwiMoE          1 replicas,                                                       
+                  TaskMapping(tasks_per_device={'ExpertSwiGLUFilter_0': 2048})x64   
+  AllToAll        64 devices                                                        
+  AllGather       1 devices                                                         
+------------------------------------------------------------------------------------
+* Statistics:
+------------------------------------------------------------
+  Name                                           Value      
+------------------------------------------------------------
+  Parameter size per device (GB)                 32.5       
+  Activation memory per device (GB)              47.5       
+  Avg. requests per iteration (per microbatch)   256.0      
+  Avg. tokens per iteration (per microbatch)     4194304.0  
+------------------------------------------------------------
+* Performance Metrics:
+----------------------------------------------------------------------------------
+  Name                                                 Value        Units         
+----------------------------------------------------------------------------------
+  Throughput: Avg. Tokens generated per second         31.025       tokens/sec    
+  Throughput: Avg. Tokens processed per second         508338.559   tokens/sec    
+  Throughput: Requests per second                      31.025       requests/sec  
+  Latency: Avg. Time to first token (TTFT in msec)     8801.609     msec          
+  Latency: Avg. Time per output token (TPOT in msec)   nan          msec          
+  Request Completion Latency: 50th percentile          8.802        sec           
+  Request Completion Latency: 95th percentile          8.802        sec           
+  Avg. MFU Per iteration                               34.855       %             
+  MBU                                                  nan          %             
+----------------------------------------------------------------------------------
+* Latency SLO Metrics:
+* Batch Size: 0
+-----------------------------------------
+  Name   Target SLO(msec)   SLOs Met(%)  
+-----------------------------------------
+  TTFT   10                 0.000 %      
+  TPOT   10                 0.000 %      
+-----------------------------------------
+* Time breakdown:
+--------------------------------------
+  Name       Time (sec)    Ratio (%)  
+--------------------------------------
+  MQA        59.11 ± 0.0   44.8       
+  AllToAll   14.10 ± 0.0   10.7       
+  SwiMoE     67.62 ± 0.0   51.2       
+  Total      132.02        100.0      
+--------------------------------------
+Energy Consumption: 4955.45 KJ
+================================================================================
+
+[STDERR]
+
+  0%|          | 0/2 [00:00<?, ?it/s]/mnt/alpha/yuepan/glassml/.venv/lib/python3.12/site-packages/juliacall/__init__.py:61: UserWarning: torch was imported before juliacall. This may cause a segfault. To avoid this, import juliacall before importing torch. For updates, see https://github.com/pytorch/pytorch/issues/78829.
+  warnings.warn(
+/mnt/alpha/yuepan/glassml/.venv/lib/python3.12/site-packages/numpy/_core/fromnumeric.py:3824: RuntimeWarning: Mean of empty slice
+  return _methods._mean(a, axis=axis, dtype=dtype,
+/mnt/alpha/yuepan/glassml/.venv/lib/python3.12/site-packages/numpy/_core/_methods.py:142: RuntimeWarning: invalid value encountered in scalar divide
+  ret = ret.dtype.type(ret / rcount)
+
+ 50%|█████     | 1/2 [00:41<00:41, 41.68s/it]
+100%|██████████| 2/2 [01:12<00:00, 35.36s/it]
+100%|██████████| 2/2 [01:12<00:00, 36.30s/it]

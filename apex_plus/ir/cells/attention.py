@@ -1,7 +1,7 @@
 from typing import List, Union
 
 from apex_plus.ir.cell import Cell
-from apex_plus.ir.tasks.attention import MHAHead, MQAHead, BiMHAHead
+from apex_plus.ir.tasks.attention import MHAHead, MQAHead, BiMHAHead, MLAHead
 from apex_plus.ir.tasks.ffn import MLPFilter
 
 
@@ -144,6 +144,67 @@ class MQA(Cell):
             and self.num_kv_heads == other.num_kv_heads
             and self.head_size == other.head_size
             and self.hidden_size == other.hidden_size
+        )
+
+
+class MLA(Cell):
+    """DeepSeek-V3 / Kimi-K2 Multi-head Latent Attention.
+
+    Each query head is one MLAHead task. Q is decomposed via q_lora_rank;
+    KV is a single shared latent of dim kv_lora_rank with an extra
+    qk_rope_head_dim for the rotary part. K/V up-projections are absorbed
+    into the per-head Q-up and into the O-proj input respectively.
+    """
+
+    def __init__(
+        self,
+        num_query_heads: int,
+        hidden_size: int,
+        q_lora_rank: int,
+        kv_lora_rank: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+    ) -> None:
+        self.num_query_heads = num_query_heads
+        self.hidden_size = hidden_size
+        self.q_lora_rank = q_lora_rank
+        self.kv_lora_rank = kv_lora_rank
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.v_head_dim = v_head_dim
+        # Effective Q/K head dim (= qk_nope + qk_rope).
+        self.head_size = qk_nope_head_dim + qk_rope_head_dim
+
+        self.heads = [
+            MLAHead(
+                head_id=i,
+                hidden_size=hidden_size,
+                q_lora_rank=q_lora_rank,
+                kv_lora_rank=kv_lora_rank,
+                qk_nope_head_dim=qk_nope_head_dim,
+                qk_rope_head_dim=qk_rope_head_dim,
+                v_head_dim=v_head_dim,
+            )
+            for i in range(num_query_heads)
+        ]
+
+    def get_tasks(self) -> List[MLAHead]:
+        return self.heads
+
+    def get_num_task_types(self) -> int:
+        return 1
+
+    def has_same_spec(self, other: object) -> bool:
+        return (
+            isinstance(other, MLA)
+            and self.num_query_heads == other.num_query_heads
+            and self.hidden_size == other.hidden_size
+            and self.q_lora_rank == other.q_lora_rank
+            and self.kv_lora_rank == other.kv_lora_rank
+            and self.qk_nope_head_dim == other.qk_nope_head_dim
+            and self.qk_rope_head_dim == other.qk_rope_head_dim
+            and self.v_head_dim == other.v_head_dim
         )
 
 

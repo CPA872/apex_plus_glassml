@@ -7,41 +7,35 @@ _GB = 1 << 30
 
 
 class GPUType(enum.Enum):
-    # A10 = enum.auto()
-    # A100_40GB = enum.auto()
-    # A100_80GB = enum.auto()
     V100_PCIE_16GB = enum.auto()
     H100_SXM_80GB = enum.auto()
     H200_SXM_141GB = enum.auto()
+    B200_SXM_192GB = enum.auto()
 
 
 _GPU_REGISTRY = {
-    # "A10": GPUType.A10,
-    # "A100-40GB": GPUType.A100_40GB,
-    # "A100-80GB": GPUType.A100_80GB,
     "V100-PCIE-16GB": GPUType.V100_PCIE_16GB,
     "H100-SXM-80GB": GPUType.H100_SXM_80GB,
     "H200-SXM-141GB": GPUType.H200_SXM_141GB,
+    "B200-SXM-192GB": GPUType.B200_SXM_192GB,
 }
 
 _GPU_TYPE_TO_MEMORY_GB = {
-    # GPUType.A10: 24 * _GB,
-    # GPUType.A100_40GB: 40 * _GB,
-    # GPUType.A100_80GB: 80 * _GB,
     GPUType.V100_PCIE_16GB: 16 * _GB,
     GPUType.H100_SXM_80GB: 80 * _GB,
     GPUType.H200_SXM_141GB: 141 * _GB,
+    GPUType.B200_SXM_192GB: 192 * _GB,
 }
 
 _GPU_TYPE_TO_TOPOLOGY = {
-    # GPUType.A10: "pcie",
-    # GPUType.A100_40GB: "nvlink",
-    # GPUType.A100_80GB: "nvlink",
     GPUType.V100_PCIE_16GB: "pcie",
     GPUType.H100_SXM_80GB: "nvlink",
     GPUType.H200_SXM_141GB: "nvlink",
+    GPUType.B200_SXM_192GB: "nvlink",
 }
 
+# Tensor-Core peak FLOPS (dense, no sparsity). BF16 == FP16 throughput on
+# Hopper/Blackwell. V100 (Volta) does not support BF16 natively.
 _GPU_PEAK_FLOPS = {
     GPUType.V100_PCIE_16GB: {
         DTYPE.FLOAT32: 7e12,
@@ -50,12 +44,20 @@ _GPU_PEAK_FLOPS = {
     GPUType.H100_SXM_80GB: {
         DTYPE.FLOAT32: 67e12,
         DTYPE.FLOAT16: 1979e12,
+        DTYPE.BFLOAT16: 1979e12,
         DTYPE.FLOAT8: 3958e12,
     },
     GPUType.H200_SXM_141GB: {
         DTYPE.FLOAT32: 67e12,
         DTYPE.FLOAT16: 1979e12,
+        DTYPE.BFLOAT16: 1979e12,
         DTYPE.FLOAT8: 3958e12,
+    },
+    GPUType.B200_SXM_192GB: {
+        DTYPE.FLOAT32: 80e12,
+        DTYPE.FLOAT16: 4500e12,
+        DTYPE.BFLOAT16: 4500e12,
+        DTYPE.FLOAT8: 9000e12,
     },
 }
 
@@ -63,6 +65,7 @@ _GPU_PEAK_MEM_BANDWIDTH = {
     GPUType.V100_PCIE_16GB: 900e9,
     GPUType.H100_SXM_80GB: 3.35e12,
     GPUType.H200_SXM_141GB: 4.8e12,
+    GPUType.B200_SXM_192GB: 8.0e12,
 }
 
 

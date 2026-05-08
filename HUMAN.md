@@ -88,6 +88,55 @@ Configure via `config.yaml` (auto-loaded) or `--config <path>`. Use `--frequency
 
 **Key finding:** Communication energy is <1% of total for NVL64 but ~8.5% for IB, reflecting AllToAll's 5.7× latency penalty on IB. Comm-only energy ratio is 12.5× (IB vs NVL64), driven by 70 pJ/bit IB carrying 87.5% of AllToAll traffic. Total energy difference is ~8.5% (5,417 vs 4,992 KJ) because GPU compute still dominates.
 
+## Spectra (Optical Circuit Switch) Mode
+
+`--interconnect spectra` adds a third interconnect configuration alongside `nvlink` and `ib`: a single-tier optical circuit switch over all R GPUs, scheduled by the SPECTRA permutation-decomposition algorithm (Lin et al., panel-scale glass design). Every GPU is a leaf on the s-plane optical mesh; there is no NVLink hierarchy in this mode.
+
+### Physical model and parameters
+
+Each GPU has `wgs_per_gpu` bidirectional waveguides, each carrying `wg_speed_gbps` Gbps. Waveguides are distributed across `num_planes` parallel OCS planes. In the baseline design `wgs_per_gpu == num_planes` (one waveguide per plane per GPU); if `wgs_per_gpu > num_planes`, waveguides are bonded per plane and per-port speed scales by the ratio.
+
+| Parameter | Units | Default | Source |
+|---|---|---|---|
+| `num_planes` | count | 8 | Powers-of-2 plot variant of the 7-plane design |
+| `wgs_per_gpu` | count | 8 | One bidirectional waveguide per plane per GPU |
+| `wg_speed_gbps` | Gbps | 1024 | ≈ 7.2 Tb/s ÷ 7 WGs ≈ 1.029 Tb/s per WG, rounded |
+| `reconfig_delay_us` | µs | 10.0 | Heater-case OCS reconfiguration delay |
+
+**Derived (used by the solver, not configured directly):**
+- Per-port bandwidth = `wg_speed_gbps / 8 × (wgs_per_gpu / num_planes)` GB/s = **128 GB/s** at defaults
+- Aggregate per-GPU egress (when all planes are saturated) = `num_planes × per-port BW` ≈ 1 TB/s at defaults
+
+The SPECTRA solver schedules an R×R bytes demand matrix; the wrapper converts bytes → microseconds using the per-port bandwidth, then calls the Julia solver via `apex_plus/mesh/spectra/spectra_solver.py`.
+
+### How it plugs in
+
+For every fabric event in the simulator's per-iteration loop, the spectra branch builds an N×N bytes demand matrix (N = comm group size) following the same traffic patterns as `apex_plus/simulator/fabric_comm.build_demand_matrix`, then calls `spectra_simulate(D, num_planes, config) -> µs`. The clean wrapper interface is in `apex_plus/simulator/spectra_sim.py` and is the only Python module that touches the Julia solver.
+
+### Configure via `config.yaml`
+
+```yaml
+spectra:
+  num_planes: 8
+  wgs_per_gpu: 8
+  wg_speed_gbps: 1024.0
+  reconfig_delay_us: 10.0
+```
+
+Or override `num_planes` from the CLI: `--num-planes <int>`.
+
+### Three-way comparison
+
+```bash
+bash run_three_way.sh   # NVL64, 8x8-IB, Spectra (single-tier OCS, 64 GPUs, 8 planes)
+```
+
+### Deferred
+
+- **Energy.** Optical-fabric `pj_per_bit` is not grounded; `get_comm_energy` returns 0.0 for spectra mode. Restore by adding a `pj_per_bit` field to `SpectraConfig` and a corresponding branch in `get_comm_energy`.
+- **Non-uniform AllToAll.** Spectra's AllToAll currently uses a uniform per-pair demand matrix even when `--moe-skew` / `--moe-dist` is set. The plumbing for a per-source `ExpertDistribution` exists (used by the `--demand-matrix` path) and can be threaded into `Simulator._spectra_comm_time` later.
+- **Use as DSE tool.** Spectra runs are simulator-only — the solver is too slow for inline plan ranking. Pin parallelism with `--force-ep` (and the existing constraints).
+
 ## What We Changed in APEX+
 
 1. **Analytical NVLink model** for >8 GPUs (NVSwitch = constant latency, not log-scaled)
@@ -99,6 +148,7 @@ Configure via `config.yaml` (auto-loaded) or `--config <path>`. Use `--frequency
 7. **Hierarchical IB model fixes**: AllToAll IB phase now correctly uses single-NIC bandwidth (no multi-rail splitting); ring collectives (AR/AG/RS) unchanged
 8. **Pluggable expert routing** (`expert_distribution.py`): AllToAll traffic modeled via per-GPU multinomial sampling with swappable distribution backends (Zipf, uniform, or custom)
 9. **Bug fixes**: Mixtral double-counting MLP, MoE registry crashes, batch size check for mixed cell-DP, demand matrix identical rows
+10. **Spectra (OCS) interconnect mode** (`--interconnect spectra`): third interconnect configuration modeling a single-tier optical circuit switch over all R GPUs. Per-fabric-event N×N demand matrices are scheduled by the Julia-backed SPECTRA solver via a clean Python wrapper (`apex_plus/simulator/spectra_sim.py`). Three physical parameters — `num_planes`, `wgs_per_gpu`, `wg_speed_gbps` — plus `reconfig_delay_us`, all in `config.yaml`.
 
 See [CHANGES.md](CHANGES.md) for full technical details.
 
@@ -119,4 +169,12 @@ python main.py --model deepseek-v3 --num-nodes 8 --num-gpus-per-node 8 \
 python main.py --model deepseek-v3 --num-nodes 1 --num-gpus-per-node 64 \
   --gpu H100-SXM-80GB --prompt-len 8192 --output-len 1 --num-requests 4096 \
   --force-ep 64 --frequency 0
+
+# Spectra (single-tier OCS over 64 GPUs, 8 planes; reads spectra:* from config.yaml)
+python main.py --model deepseek-v3 --num-nodes 1 --num-gpus-per-node 64 \
+  --gpu H100-SXM-80GB --prompt-len 8192 --output-len 1 --num-requests 4096 \
+  --force-ep 64 --interconnect spectra --num-planes 8
+
+# Three-way comparison: NVL64 vs 8x8-IB vs Spectra
+bash run_three_way.sh
 ```
